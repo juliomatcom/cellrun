@@ -1,0 +1,15 @@
+[package]
+name = "domain"
+description = "Enterprise rules: jobs, tasks, steps, results. Pure Rust, no I/O, no external deps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Innermost circle: MUST NOT depend on any other crate of this workspace,
+# nor on runtime/IO/serialization crates.
+[dependencies]
+
+[lints]
+workspace = true

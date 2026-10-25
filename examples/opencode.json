@@ -1,0 +1,29 @@
+{
+  "id": "opencode-demo",
+  "max_parallel": 2,
+  "defaults": {
+    "image": "hostprobe/opencode-runner:latest",
+    "env_passthrough": ["ANTHROPIC_API_KEY"],
+    "workdir": "/workspace",
+    "memory_mb": 384,
+    "cpus": 1.0,
+    "timeout_secs": 900
+  },
+  "tasks": [
+    {
+      "id": "fizzbuzz",
+      "steps": [
+        { "name": "scaffold", "run": "git init -q . && printf '# demo\\n' > README.md" },
+        { "name": "code", "run": "opencode run 'Create fizzbuzz.sh, a POSIX shell script that prints FizzBuzz from 1 to 20. Make it executable.'" },
+        { "name": "verify", "run": "sh ./fizzbuzz.sh | head -n 15", "timeout_secs": 30 }
+      ]
+    },
+    {
+      "id": "smoke",
+      "steps": [
+        "opencode --version",
+        { "run": "uname -a && id", "continue_on_error": true }
+      ]
+    }
+  ]
+}

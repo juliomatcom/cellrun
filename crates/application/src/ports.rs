@@ -1,0 +1,102 @@
+use std::fmt;
+use std::future::Future;
+use std::time::Duration;
+
+use domain::{ContainerSpec, Event, JobId, StreamKind, TaskId};
+
+/// Error reported by a [`ContainerRuntime`] implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeError(pub String);
+
+impl RuntimeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RuntimeError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecStatus {
+    Exited(i64),
+    TimedOut,
+}
+
+/// Receives raw output chunks while a command runs.
+pub trait OutputObserver: Send {
+    fn on_output(&mut self, stream: StreamKind, chunk: &[u8]);
+}
+
+/// Driven port: something able to run ephemeral containers.
+pub trait ContainerRuntime: Send + Sync {
+    /// Creates and starts a long-lived container for `task`; returns its id.
+    fn start(
+        &self,
+        job: &JobId,
+        task: &TaskId,
+        spec: &ContainerSpec,
+    ) -> impl Future<Output = Result<String, RuntimeError>> + Send;
+
+    /// Runs `command` through a shell inside the container, streaming output
+    /// to `observer`. Must return [`ExecStatus::TimedOut`] after `timeout`.
+    fn exec(
+        &self,
+        container_id: &str,
+        command: &str,
+        timeout: Duration,
+        observer: &mut dyn OutputObserver,
+    ) -> impl Future<Output = Result<ExecStatus, RuntimeError>> + Send;
+
+    /// Force-removes the container. Must be idempotent.
+    fn remove(&self, container_id: &str) -> impl Future<Output = Result<(), RuntimeError>> + Send;
+
+    /// Removes every container belonging to `job` (crash/signal cleanup).
+    /// Returns how many were removed.
+    fn remove_job(&self, job: &JobId) -> impl Future<Output = Result<usize, RuntimeError>> + Send;
+}
+
+/// Driven port: where progress events and logs go.
+pub trait EventSink: Send + Sync {
+    fn emit(&self, event: &Event<'_>);
+}
+
+impl<T: EventSink + ?Sized> EventSink for &T {
+    fn emit(&self, event: &Event<'_>) {
+        (**self).emit(event);
+    }
+}
+
+impl<T: ContainerRuntime + ?Sized> ContainerRuntime for &T {
+    fn start(
+        &self,
+        job: &JobId,
+        task: &TaskId,
+        spec: &ContainerSpec,
+    ) -> impl Future<Output = Result<String, RuntimeError>> + Send {
+        (**self).start(job, task, spec)
+    }
+
+    fn exec(
+        &self,
+        container_id: &str,
+        command: &str,
+        timeout: Duration,
+        observer: &mut dyn OutputObserver,
+    ) -> impl Future<Output = Result<ExecStatus, RuntimeError>> + Send {
+        (**self).exec(container_id, command, timeout, observer)
+    }
+
+    fn remove(&self, container_id: &str) -> impl Future<Output = Result<(), RuntimeError>> + Send {
+        (**self).remove(container_id)
+    }
+
+    fn remove_job(&self, job: &JobId) -> impl Future<Output = Result<usize, RuntimeError>> + Send {
+        (**self).remove_job(job)
+    }
+}

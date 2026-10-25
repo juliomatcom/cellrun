@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/domain", "crates/application", "crates/infrastructure", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# Internal crates (inner -> outer: domain <- application <- infrastructure <- cli)
+domain = { path = "crates/domain" }
+application = { path = "crates/application" }
+infrastructure = { path = "crates/infrastructure" }
+
+# External
+bollard = { version = "0.21", default-features = false, features = ["pipe"] }
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,9 @@
+{
+  "id": "hello",
+  "max_parallel": 2,
+  "defaults": { "image": "debian:bookworm-slim", "memory_mb": 64, "timeout_secs": 30 },
+  "tasks": [
+    { "id": "greet", "env": { "NAME": "world" }, "steps": ["echo \"hello $NAME\"", "echo to-stderr >&2"] },
+    { "id": "fail", "steps": ["exit 3", "echo skipped"] }
+  ]
+}

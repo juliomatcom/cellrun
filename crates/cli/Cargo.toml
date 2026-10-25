@@ -1,0 +1,23 @@
+[package]
+name = "cli"
+description = "Composition root: parses arguments, wires adapters into use cases."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Outermost circle: may depend on every inner crate. Nothing depends on it.
+[[bin]]
+name = "orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+infrastructure.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "signal"] }
+
+[lints]
+workspace = true
