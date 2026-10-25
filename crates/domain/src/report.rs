@@ -21,6 +21,18 @@ impl StepOutcome {
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Succeeded)
     }
+
+    /// Whether this outcome stops the remaining steps of its task.
+    ///
+    /// A timeout always halts: the runtime cannot stop the timed-out process
+    /// without destroying the container, so later steps would race with it.
+    pub fn halts_task(&self, continue_on_error: bool) -> bool {
+        match self {
+            Self::Succeeded | Self::Skipped => false,
+            Self::TimedOut => true,
+            Self::Failed { .. } | Self::Error { .. } => !continue_on_error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,12 +81,17 @@ pub struct TaskReport {
 }
 
 impl TaskReport {
-    /// Derives the status from step outcomes; any non-ignored failure fails the
-    /// task. `ignored` marks steps whose failure is tolerated.
-    pub fn status_from_steps(steps: &[StepReport], ignored: impl Fn(usize) -> bool) -> TaskStatus {
-        let failed = steps.iter().enumerate().any(|(i, s)| {
-            !matches!(s.outcome, StepOutcome::Succeeded | StepOutcome::Skipped) && !ignored(i)
-        });
+    /// Derives the status from step outcomes; any failure fails the task
+    /// unless `continue_on_error(i)` tolerates it. Timeouts are never
+    /// tolerated (see [`StepOutcome::halts_task`]).
+    pub fn status_from_steps(
+        steps: &[StepReport],
+        continue_on_error: impl Fn(usize) -> bool,
+    ) -> TaskStatus {
+        let failed = steps
+            .iter()
+            .enumerate()
+            .any(|(i, s)| s.outcome.halts_task(continue_on_error(i)));
         if failed {
             TaskStatus::Failed
         } else {
@@ -130,6 +147,18 @@ mod tests {
             TaskReport::status_from_steps(&steps, |_| false),
             TaskStatus::Succeeded
         );
+    }
+
+    #[test]
+    fn timeouts_fail_and_halt_even_with_continue_on_error() {
+        let steps = [step(StepOutcome::TimedOut)];
+        assert_eq!(
+            TaskReport::status_from_steps(&steps, |_| true),
+            TaskStatus::Failed
+        );
+        assert!(StepOutcome::TimedOut.halts_task(true));
+        assert!(!StepOutcome::Failed { exit_code: 1 }.halts_task(true));
+        assert!(StepOutcome::Failed { exit_code: 1 }.halts_task(false));
     }
 
     #[test]

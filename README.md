@@ -68,11 +68,12 @@ ANTHROPIC_API_KEY=... ./target/release/orchestrator run examples/opencode.json \
 orchestrator run <JOB|-> [--events <PATH|->] [--report <PATH|->]
                          [--pull missing|always|never] [--tail-bytes N]
 orchestrator validate <JOB|->
-orchestrator cleanup <JOB_ID>        # remove leftover containers of a job
+orchestrator cleanup <JOB_ID>        # remove leftovers of a job (ALL runs of that id)
 ```
 
 Exit codes: `0` all tasks succeeded · `1` some task failed · `2` invalid
-input · `3` Docker/IO error · `130` interrupted (containers are removed).
+input · `3` Docker/IO error · `130` interrupted (this run's containers and
+networks are removed; concurrent runs of the same job are not touched).
 
 ## Job file
 
@@ -105,8 +106,11 @@ input · `3` Docker/IO error · `130` interrupted (containers are removed).
 ```
 
 Steps run with `/bin/sh -c` in the same container, so files persist between
-steps of a task. A failing step (non-zero exit, timeout, runtime error) skips
-the rest of the task unless `continue_on_error` is set. Unknown fields are
+steps of a task. A failing step (non-zero exit, runtime error) skips the rest
+of the task unless `continue_on_error` is set. A **timeout always fails and
+halts the task**, even with `continue_on_error`: the timed-out process cannot
+be stopped without destroying the container, so later steps would race with
+it. `memory_mb` and `pids` must be > 0 (Docker reads 0 as "unlimited"). Unknown fields are
 rejected. A missing `env_passthrough` variable is an input error.
 
 ## Events (NDJSON)
@@ -162,6 +166,20 @@ The orchestrator itself needs a few MiB (compose caps it at 64 MiB). Budget the 
 `max_parallel × memory_mb` + Docker daemon (~100 MiB) + OS. gVisor adds
 roughly 20–50 MiB per running task. E.g.
 `max_parallel: 2`, `memory_mb: 384` leaves comfortable headroom.
+
+## Concurrency limit: Docker address pools
+
+Each running task owns one network. Docker's default address pools allow
+only about 30 networks on a host (including compose networks), so more
+concurrent tasks fail with `address pools are exhausted`. To raise the
+ceiling, hand out small subnets in `/etc/docker/daemon.json` and restart
+Docker:
+
+```json
+{ "default-address-pools": [ { "base": "10.200.0.0/16", "size": 24 } ] }
+```
+
+That allows 256 networks. Task networks stay isolated whatever their subnet.
 
 ## Architecture
 

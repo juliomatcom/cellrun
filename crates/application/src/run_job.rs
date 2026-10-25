@@ -134,7 +134,7 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
                 };
                 capture.into_report(&step.name, outcome, step_started.elapsed())
             };
-            halted |= !report.outcome.is_success() && !step.continue_on_error;
+            halted |= report.outcome.halts_task(step.continue_on_error);
             self.sink.emit(&Event::StepFinished {
                 task: &task.id,
                 index,

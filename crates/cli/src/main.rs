@@ -173,8 +173,14 @@ async fn run(
         () = shutdown_signal() => {
             // Dropping `execute` abandons in-flight work; reap its containers.
             sink.emit(&Event::Warning { task: None, message: "interrupted, removing containers" });
-            if let Err(e) = runtime.remove_job(&job.id).await {
-                eprintln!("cleanup failed: {e}; run `orchestrator cleanup {}`", job.id);
+            // Only this process's containers: a concurrent run of the same job
+            // is left alone. The second sweep catches a create request that was
+            // already in flight when `execute` was dropped.
+            for delay in [0, 500] {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                if let Err(e) = runtime.remove_owned().await {
+                    eprintln!("cleanup failed: {e}; run `orchestrator cleanup {}`", job.id);
+                }
             }
             return ExitCode::from(EXIT_INTERRUPTED);
         }

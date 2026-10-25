@@ -37,6 +37,9 @@ pub const BRIDGE_PREFIX: &str = "hp";
 pub const LABEL_MANAGED: &str = "hostprobe.orchestrator";
 pub const LABEL_JOB: &str = "hostprobe.job";
 pub const LABEL_TASK: &str = "hostprobe.task";
+/// Unique per orchestrator process: signal cleanup must only touch what this
+/// process created, never a concurrent run of the same job.
+pub const LABEL_RUN: &str = "hostprobe.run";
 
 /// Keeps the container alive between `exec` calls; falls back to a loop on
 /// images whose `sleep` lacks `infinity` (e.g. old busybox).
@@ -79,6 +82,7 @@ pub struct DockerRuntime {
     config: DockerConfig,
     /// container id -> its private network.
     networks: Mutex<HashMap<String, String>>,
+    run_id: String,
 }
 
 impl DockerRuntime {
@@ -89,6 +93,7 @@ impl DockerRuntime {
             docker,
             config,
             networks: Mutex::new(HashMap::new()),
+            run_id: unique_hex(),
         })
     }
 
@@ -148,7 +153,16 @@ impl DockerRuntime {
             .create_network(request)
             .await
             .map(drop)
-            .map_err(|e| RuntimeError::new(format!("create network: {e}")))
+            .map_err(|e| {
+                let hint = if e.to_string().contains("address pools") {
+                    " (Docker's address pools are exhausted: lower max_parallel, run \
+                     `orchestrator cleanup <job>` for leftovers, or configure smaller \
+                     `default-address-pools` in daemon.json, see README)"
+                } else {
+                    ""
+                };
+                RuntimeError::new(format!("create network: {e}{hint}"))
+            })
     }
 
     async fn remove_network(&self, name: &str) -> Result<(), RuntimeError> {
@@ -242,6 +256,7 @@ impl ContainerRuntime for DockerRuntime {
             (LABEL_MANAGED.to_owned(), "1".to_owned()),
             (LABEL_JOB.to_owned(), job.to_string()),
             (LABEL_TASK.to_owned(), task.to_string()),
+            (LABEL_RUN.to_owned(), self.run_id.clone()),
         ]);
         let (name, bridge) = unique_names(job, task);
         self.create_network(&name, &bridge, &labels).await?;
@@ -330,10 +345,19 @@ impl ContainerRuntime for DockerRuntime {
     }
 
     async fn remove_job(&self, job: &JobId) -> Result<usize, RuntimeError> {
-        let filters = HashMap::from([(
-            "label",
-            vec![format!("{LABEL_MANAGED}=1"), format!("{LABEL_JOB}={job}")],
-        )]);
+        self.remove_labelled(format!("{LABEL_JOB}={job}")).await
+    }
+
+    async fn remove_owned(&self) -> Result<usize, RuntimeError> {
+        self.remove_labelled(format!("{LABEL_RUN}={}", self.run_id))
+            .await
+    }
+}
+
+impl DockerRuntime {
+    /// Removes managed containers, then networks, matching `label`.
+    async fn remove_labelled(&self, label: String) -> Result<usize, RuntimeError> {
+        let filters = HashMap::from([("label", vec![format!("{LABEL_MANAGED}=1"), label])]);
         let options = ListContainersOptionsBuilder::default()
             .all(true)
             .filters(&filters)
@@ -343,10 +367,16 @@ impl ContainerRuntime for DockerRuntime {
             .list_containers(Some(options))
             .await
             .map_err(err)?;
+        // Best effort: keep going past failures, report the first one.
+        let mut first_err = None;
         let mut removed = 0;
         for id in containers.into_iter().filter_map(|c| c.id) {
-            self.remove(&id).await?;
-            removed += 1;
+            match self.remove(&id).await {
+                Ok(()) => removed += 1,
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
         }
         // Networks left by a crashed run (their container map is gone).
         let options = ListNetworksOptionsBuilder::new().filters(&filters).build();
@@ -356,9 +386,11 @@ impl ContainerRuntime for DockerRuntime {
             .await
             .map_err(err)?;
         for name in networks.into_iter().filter_map(|n| n.name) {
-            self.remove_network(&name).await?;
+            if let Err(e) = self.remove_network(&name).await {
+                first_err.get_or_insert(e);
+            }
         }
-        Ok(removed)
+        first_err.map_or(Ok(removed), Err)
     }
 }
 
@@ -398,6 +430,15 @@ fn normalize_image_ref(image: &str) -> String {
 /// readable in `docker ps`) and its bridge interface (`hp<id>`, which must
 /// fit Linux's 15-byte interface name limit).
 fn unique_names(job: &JobId, task: &TaskId) -> (String, String) {
+    let id = unique_hex();
+    (
+        format!("hp-{job}-{task}-{id}"),
+        format!("{BRIDGE_PREFIX}{id}"),
+    )
+}
+
+/// 13 hex chars (52 bits) mixing time, pid and a process-wide counter.
+fn unique_hex() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -407,11 +448,7 @@ fn unique_names(job: &JobId, task: &TaskId) -> (String, String) {
     // 52 bits of time-ish entropy mixed with pid and a counter -> 13 hex chars.
     let id =
         (nanos ^ (u64::from(std::process::id()) << 32) ^ seq.rotate_left(40)) & ((1 << 52) - 1);
-    let id = format!("{id:013x}");
-    (
-        format!("hp-{job}-{task}-{id}"),
-        format!("{BRIDGE_PREFIX}{id}"),
-    )
+    format!("{id:013x}")
 }
 
 #[cfg(test)]

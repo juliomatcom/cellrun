@@ -107,6 +107,10 @@ impl ContainerRuntime for FakeRuntime {
     async fn remove_job(&self, _: &JobId) -> Result<usize, RuntimeError> {
         Ok(0)
     }
+
+    async fn remove_owned(&self) -> Result<usize, RuntimeError> {
+        Ok(0)
+    }
 }
 
 #[derive(Default)]
@@ -222,6 +226,26 @@ async fn continue_on_error_keeps_going_and_does_not_fail_task() {
 
     assert_eq!(report.tasks[0].status, TaskStatus::Succeeded);
     assert_eq!(report.tasks[0].steps[1].outcome, StepOutcome::Succeeded);
+}
+
+#[tokio::test]
+async fn timeout_halts_task_even_with_continue_on_error() {
+    let timeout = Script {
+        result: Ok(ExecStatus::TimedOut),
+        ..Script::ok(&[])
+    };
+    let runtime = FakeRuntime::with(&[("slow", timeout)]);
+    let sink = RecordingSink::default();
+    let mut tolerated = step("slow");
+    tolerated.continue_on_error = true;
+
+    let report = RunJob::new(&runtime, &sink, OutputLimits::default())
+        .execute(&job(1, vec![task("t", vec![tolerated, step("next")])]))
+        .await;
+
+    assert_eq!(report.tasks[0].status, TaskStatus::Failed);
+    assert_eq!(report.tasks[0].steps[1].outcome, StepOutcome::Skipped);
+    assert_eq!(runtime.calls(), ["start t", "exec c-t slow", "remove c-t"]);
 }
 
 #[tokio::test]

@@ -17,7 +17,7 @@ application.workspace = true
 domain.workspace = true
 infrastructure.workspace = true
 clap.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt", "macros", "signal", "time"] }
 
 [lints]
 workspace = true

@@ -64,6 +64,11 @@ pub trait ContainerRuntime: Send + Sync {
     /// (crash/signal cleanup).
     /// Returns how many were removed.
     fn remove_job(&self, job: &JobId) -> impl Future<Output = Result<usize, RuntimeError>> + Send;
+
+    /// Removes every container (and network) created by *this* runtime
+    /// instance, leaving concurrent runs of the same job alone (signal
+    /// cleanup). Returns how many containers were removed.
+    fn remove_owned(&self) -> impl Future<Output = Result<usize, RuntimeError>> + Send;
 }
 
 /// Driven port: where progress events and logs go.
@@ -103,5 +108,9 @@ impl<T: ContainerRuntime + ?Sized> ContainerRuntime for &T {
 
     fn remove_job(&self, job: &JobId) -> impl Future<Output = Result<usize, RuntimeError>> + Send {
         (**self).remove_job(job)
+    }
+
+    fn remove_owned(&self) -> impl Future<Output = Result<usize, RuntimeError>> + Send {
+        (**self).remove_owned()
     }
 }

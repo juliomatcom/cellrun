@@ -140,6 +140,14 @@ fn to_task(
             })?;
     let mut spec = ContainerSpec::new(image).map_err(invalid)?;
 
+    for key in defaults.env.keys().chain(c.env.keys()) {
+        if key.is_empty() || key.contains(['=', '\0']) {
+            return Err(InputError::Limit {
+                task: id.to_string(),
+                message: "env names must be non-empty and contain no `=` or NUL",
+            });
+        }
+    }
     let mut env = defaults.env.clone();
     for name in defaults.env_passthrough.iter().chain(&c.env_passthrough) {
         // Empty counts as missing: a blank API key should fail fast, not
@@ -161,21 +169,28 @@ fn to_task(
         task: id.to_string(),
         message,
     };
+    // Docker reads 0 as "unlimited": reject it rather than silently lifting
+    // the limit.
+    let memory_mb = c.memory_mb.or(defaults.memory_mb);
+    let pids = c.pids.or(defaults.pids);
+    if memory_mb == Some(0) || pids == Some(0) {
+        return Err(limit_err(
+            "`memory_mb` and `pids` must be greater than zero",
+        ));
+    }
     let cpus = c.cpus.or(defaults.cpus);
     if cpus.is_some_and(|v| !(v.is_finite() && v > 0.0)) {
         return Err(limit_err("`cpus` must be a positive number"));
     }
     spec.limits = ResourceLimits {
-        memory_bytes: c
-            .memory_mb
-            .or(defaults.memory_mb)
+        memory_bytes: memory_mb
             .map(|mb| {
                 mb.checked_mul(1024 * 1024)
                     .ok_or_else(|| limit_err("`memory_mb` too large"))
             })
             .transpose()?,
         nano_cpus: cpus.map(|v| (v * 1e9) as u64),
-        pids: c.pids.or(defaults.pids),
+        pids,
     };
 
     let task_timeout = c.timeout_secs.or(defaults.timeout_secs);
@@ -305,6 +320,11 @@ mod tests {
             r#"{"max_parallel":0,"tasks":[{"id":"t","image":"x","steps":["ls"]}]}"#,
             // Isolation is not configurable from a job.
             r#"{"tasks":[{"id":"t","image":"x","network":"host","steps":["ls"]}]}"#,
+            // 0 would mean "unlimited" to Docker.
+            r#"{"tasks":[{"id":"t","image":"x","memory_mb":0,"steps":["ls"]}]}"#,
+            r#"{"defaults":{"pids":0},"tasks":[{"id":"t","image":"x","steps":["ls"]}]}"#,
+            r#"{"tasks":[{"id":"t","image":"x","env":{"A=B":"1"},"steps":["ls"]}]}"#,
+            r#"{"tasks":[{"id":"t","image":"x","env":{"":"1"},"steps":["ls"]}]}"#,
         ] {
             assert!(
                 parse_job(json.as_bytes(), env).is_err(),

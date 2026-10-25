@@ -234,3 +234,26 @@ async fn task_containers_are_isolated_from_host_and_each_other() {
     assert_eq!(runtime.remove_job(&job).await.unwrap(), 2);
     remove_backend_service(&docker).await;
 }
+
+#[tokio::test]
+#[ignore = "requires a Docker daemon"]
+async fn remove_owned_spares_concurrent_runs_of_the_same_job() {
+    let job = JobId::new("it-owned").unwrap();
+    let task = TaskId::new("t").unwrap();
+    let spec = ContainerSpec::new(image()).unwrap();
+    let run_a = DockerRuntime::connect(DockerConfig::default()).unwrap();
+    let run_b = DockerRuntime::connect(DockerConfig::default()).unwrap();
+    run_a.remove_job(&job).await.unwrap();
+    run_a.start(&job, &task, &spec).await.unwrap();
+    let b = run_b.start(&job, &task, &spec).await.unwrap();
+
+    assert_eq!(run_a.remove_owned().await.unwrap(), 1);
+    // Run B's container is still alive and usable.
+    let mut out = Collect::default();
+    let status = run_b
+        .exec(&b, "true", Duration::from_secs(10), &mut out)
+        .await
+        .unwrap();
+    assert_eq!(status, ExecStatus::Exited(0));
+    assert_eq!(run_b.remove_owned().await.unwrap(), 1);
+}

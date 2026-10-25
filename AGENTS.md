@@ -72,16 +72,20 @@ a dependency on an outer crate or on forbidden tech (e.g. `serde` in
 - Per task: `start` (pull if needed, create with limits + labels, start
   `sleep infinity` under `--init`) → `exec` each step with `/bin/sh -c` →
   `remove` (always). Steps share the container, so files persist across steps.
-- A failed/timed-out step halts the task (remaining steps `skipped`) unless
-  `continue_on_error`. Timed-out processes are killed when the container is
-  removed.
+- A failed step halts the task (remaining steps `skipped`) unless
+  `continue_on_error`. A timeout always halts and fails the task
+  (`StepOutcome::halts_task`): Docker cannot kill an exec'd process, so the
+  container is removed instead, which kills it.
 - Output: every chunk → `LineSplitter` (max line 8 KiB) → `output` event;
   report keeps only a `TailBuffer` (default 16 KiB) per stream per step.
 - Per task: create network `hp-<job>-<task>-<id>` (bridge iface `hp<id>`) →
   create/start container on it → steps → remove container → remove network.
 - Containers and networks carry labels `hostprobe.orchestrator=1`,
-  `hostprobe.job=<id>`, `hostprobe.task=<id>`; `orchestrator cleanup <job>`
-  reaps leftovers of both.
+  `hostprobe.job=<id>`, `hostprobe.task=<id>`, `hostprobe.run=<per-process id>`.
+  On SIGINT/SIGTERM only this run's resources are removed (`remove_owned`);
+  `orchestrator cleanup <job>` reaps leftovers of every run of that job.
+- One network per running task: Docker's default address pools cap this at
+  ~30 (see README to raise it).
 - Defaults applied by the Docker adapter: `memory_swap = memory` (no swap),
   `pids_limit = 512`, private IPC, `init`.
 
