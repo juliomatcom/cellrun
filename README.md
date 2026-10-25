@@ -7,6 +7,27 @@ every output line as NDJSON, and writes a JSON report. Built for small VMs
 MiB RSS, bounded output buffers, no `docker` CLI processes (talks to the
 Engine API over `/var/run/docker.sock`).
 
+## Isolation
+
+Every task runs in a throwaway container that is isolated from the host and
+from every other task. The workload inside (e.g. opencode) has full access to
+its own container: root, a writable filesystem and the public internet.
+
+- **Own network per task:** each container is the only member of its own
+  bridge network, so tasks cannot see each other.
+- **No host access:** `sandbox-guard` installs host firewall rules on those
+  bridges (`hp*` interfaces). Tasks cannot reach any host address, the LAN,
+  cloud metadata (169.254.169.254) or other containers. Public internet still
+  works.
+- **Nothing shared:** no bind mounts, no volumes and no Docker socket.
+  Containers and networks are deleted when the task ends.
+- **Separate kernel (optional, recommended):** set `TASK_RUNTIME=runsc` to run
+  tasks under [gVisor](https://gvisor.dev). Root inside the container then
+  never touches the host kernel directly. Install `runsc` on the host and
+  register it with Docker first (`runsc install && systemctl restart docker`).
+- **Not configurable from job files:** jobs cannot change networking,
+  mounts or privileges.
+
 ## Quick start (Docker Compose, recommended)
 
 From the repo root:
@@ -24,13 +45,15 @@ docker compose --progress quiet run --rm -T orchestrator run /examples/hello.jso
 - Variables listed in the job's `env_passthrough` must be set in `.env` (and
   listed under `environment:` in [`compose.yaml`](compose.yaml)); empty
   values are rejected.
-- The orchestrator uses the host's Docker daemon via the mounted socket, as a
-  non-root user in the docker group. `docker stop` / Ctrl-C removes all task
-  containers it started.
+- `sandbox-guard` runs first automatically and installs the firewall rules
+  (idempotent). The orchestrator itself has no network; it drives the host's
+  Docker daemon via the mounted socket as a non-root user in the docker
+  group. `docker stop` / Ctrl-C removes all task containers and networks.
 
 ## Quick start (bare binary)
 
 ```sh
+sudo sandbox-guard/guard.sh apply          # host firewall for task networks (once per boot)
 cd apps/orchestrator
 cargo build --release
 docker build -t hostprobe/opencode-runner:latest runner   # Debian + opencode
@@ -61,7 +84,6 @@ input · `3` Docker/IO error · `130` interrupted (containers are removed).
     "env": { "TZ": "UTC" },
     "env_passthrough": ["ANTHROPIC_API_KEY"],  // copied from orchestrator env
     "workdir": "/workspace",
-    "network": "bridge",           // docker network mode
     "memory_mb": 384,              // hard limit, swap disabled
     "cpus": 1.0,
     "pids": 512,
@@ -129,13 +151,15 @@ Task `status`: `succeeded`, `failed`, `error` (+`error`, e.g. image pull failed)
 
 [`runner/Dockerfile`](runner/Dockerfile): `debian:bookworm-slim` + git, curl,
 ripgrep, jq… + a pinned `opencode` (`--build-arg OPENCODE_VERSION=…`), running
-as unprivileged user `agent` in `/workspace`. API keys are injected at run
-time via `env_passthrough`, never baked into the image.
+as root in `/workspace` (full access inside; see [Isolation](#isolation)). API
+keys are injected at run time via `env_passthrough`, never baked into the
+image.
 
 ## Memory sizing on a 1 GiB VM
 
 The orchestrator itself needs a few MiB (compose caps it at 64 MiB). Budget the rest as
-`max_parallel × memory_mb` + Docker daemon (~100 MiB) + OS. E.g.
+`max_parallel × memory_mb` + Docker daemon (~100 MiB) + OS. gVisor adds
+roughly 20–50 MiB per running task. E.g.
 `max_parallel: 2`, `memory_mb: 384` leaves comfortable headroom.
 
 ## Architecture

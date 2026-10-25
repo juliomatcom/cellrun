@@ -36,6 +36,10 @@ pub trait OutputObserver: Send {
 /// Driven port: something able to run ephemeral containers.
 pub trait ContainerRuntime: Send + Sync {
     /// Creates and starts a long-lived container for `task`; returns its id.
+    ///
+    /// Isolation contract: every container gets its own network and no
+    /// mounts, so it shares nothing with the host or with other tasks.
+    /// Inside, the workload has full access (root, internet).
     fn start(
         &self,
         job: &JobId,
@@ -53,10 +57,11 @@ pub trait ContainerRuntime: Send + Sync {
         observer: &mut dyn OutputObserver,
     ) -> impl Future<Output = Result<ExecStatus, RuntimeError>> + Send;
 
-    /// Force-removes the container. Must be idempotent.
+    /// Force-removes the container and its network. Must be idempotent.
     fn remove(&self, container_id: &str) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
-    /// Removes every container belonging to `job` (crash/signal cleanup).
+    /// Removes every container and network belonging to `job`
+    /// (crash/signal cleanup).
     /// Returns how many were removed.
     fn remove_job(&self, job: &JobId) -> impl Future<Output = Result<usize, RuntimeError>> + Send;
 }

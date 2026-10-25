@@ -11,6 +11,32 @@ a JSON report. Containers are always force-removed (also on SIGINT/SIGTERM).
 
 Target: a VM with ~1 GiB RAM. The orchestrator itself idles at a few MiB.
 
+## Isolation model (the core requirement)
+
+Each task container is fully isolated **from the host and from every other
+task**, while the workload inside (e.g. opencode) has **full access** to its
+own container: root, writable filesystem, public internet.
+
+| Layer | Mechanism | Where |
+|---|---|---|
+| Network: other tasks | one bridge network per task (sole member), ICC off | `docker.rs` |
+| Network: host + LAN + metadata | bridges named `hp<hex>`; host firewall drops `-i hp+` to INPUT and to private ranges in DOCKER-USER | `sandbox-guard/guard.sh` |
+| DNS | explicit public resolvers (private ranges are dropped) | `--task-dns` |
+| Filesystem | no bind mounts, no volumes, no docker socket; anonymous volumes removed with the container | `docker.rs` |
+| Kernel (optional) | `--task-runtime runsc` (gVisor) | `TASK_RUNTIME` in `.env` |
+| Resources | memory (no swap), CPU, pids limits | job file + defaults |
+
+Rules:
+- **Jobs cannot weaken isolation.** `ContainerSpec` has no network, mount,
+  capability or privilege fields; job input uses `deny_unknown_fields`.
+  Do not add such fields.
+- Do **not** restrict the workload inside the container (no cap drops, no
+  read-only rootfs, no non-root user requirement): isolation is enforced at
+  the boundary, not by crippling the tool.
+- Run `sandbox-guard` before any task starts (compose `depends_on` does
+  this). Without it, tasks can reach the host. The isolation integration
+  test fails if the rules are missing.
+
 ## Crates (one per circle — the dependency rule is enforced by Cargo)
 
 ```
@@ -51,10 +77,13 @@ a dependency on an outer crate or on forbidden tech (e.g. `serde` in
   removed.
 - Output: every chunk → `LineSplitter` (max line 8 KiB) → `output` event;
   report keeps only a `TailBuffer` (default 16 KiB) per stream per step.
-- Containers carry labels `hostprobe.orchestrator=1`, `hostprobe.job=<id>`,
-  `hostprobe.task=<id>`; `orchestrator cleanup <job>` reaps leftovers.
+- Per task: create network `hp-<job>-<task>-<id>` (bridge iface `hp<id>`) →
+  create/start container on it → steps → remove container → remove network.
+- Containers and networks carry labels `hostprobe.orchestrator=1`,
+  `hostprobe.job=<id>`, `hostprobe.task=<id>`; `orchestrator cleanup <job>`
+  reaps leftovers of both.
 - Defaults applied by the Docker adapter: `memory_swap = memory` (no swap),
-  `pids_limit = 512`, `no-new-privileges`, `init`.
+  `pids_limit = 512`, private IPC, `init`.
 
 ## Contracts
 
@@ -73,13 +102,14 @@ Changing a wire format is a breaking change: update README and tests together.
 - `Dockerfile`: multi-stage, `rust:1-slim-bookworm` build → 
   `gcr.io/distroless/cc-debian12:nonroot` runtime (~40 MB, no shell).
   Examples are baked in at `/examples`.
-- `compose.yaml` (included by the repo root): services `orchestrator` and
-  build-only `opencode-runner`, both under profile `orchestrator` because the
-  orchestrator is a run-to-completion CLI.
-- The container talks to the **host** daemon through the mounted socket, runs
-  as uid 65532 with `group_add: ${DOCKER_GID}`, read-only rootfs, no caps,
-  `mem_limit: 64m`. Task containers are siblings on the host; if you ever add
-  bind mounts to task containers, they must be host paths.
+- `compose.yaml` (included by the repo root), all under profile
+  `orchestrator` (run-to-completion): `sandbox-guard` (one-shot, host
+  network, NET_ADMIN, installs firewall rules), `orchestrator` (depends on
+  the guard having completed) and build-only `opencode-runner`.
+- The orchestrator container talks to the **host** daemon through the
+  mounted socket, runs as uid 65532 with `group_add: ${DOCKER_GID}`,
+  `network_mode: none`, read-only rootfs, no caps, `mem_limit: 64m`.
+  Task containers are siblings on the host.
 - Job files: `jobs/` is mounted read-only at `/jobs`. Report → stdout, events
   → stderr (container fs is read-only; redirect on the host).
 - `init: true` forwards SIGTERM (`docker stop`, `compose down`) so the
@@ -92,7 +122,8 @@ cd apps/orchestrator
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 cargo test                                                   # unit + architecture
-cargo test -p infrastructure --test docker -- --ignored      # needs Docker
+sudo sandbox-guard/guard.sh apply                            # host firewall (once per boot)
+cargo test -p infrastructure --test docker -- --ignored      # needs Docker + guard
 cargo build --release                                        # target/release/orchestrator
 docker build -t hostprobe/opencode-runner:latest runner      # task image
 

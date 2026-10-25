@@ -63,7 +63,6 @@ struct ContainerDto {
     #[serde(default)]
     env_passthrough: Vec<String>,
     workdir: Option<String>,
-    network: Option<String>,
     memory_mb: Option<u64>,
     cpus: Option<f64>,
     pids: Option<u64>,
@@ -157,7 +156,6 @@ fn to_task(
     env.extend(c.env);
     spec.env = env.into_iter().collect();
     spec.workdir = c.workdir.or_else(|| defaults.workdir.clone());
-    spec.network = c.network.or_else(|| defaults.network.clone());
 
     let limit_err = |message| InputError::Limit {
         task: id.to_string(),
@@ -305,6 +303,8 @@ mod tests {
             r#"{"tasks":[{"id":"t","image":"x","steps":[]}]}"#,
             r#"{"tasks":[{"id":"t","image":"x","cpus":-1,"steps":["ls"]}]}"#,
             r#"{"max_parallel":0,"tasks":[{"id":"t","image":"x","steps":["ls"]}]}"#,
+            // Isolation is not configurable from a job.
+            r#"{"tasks":[{"id":"t","image":"x","network":"host","steps":["ls"]}]}"#,
         ] {
             assert!(
                 parse_job(json.as_bytes(), env).is_err(),

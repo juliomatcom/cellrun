@@ -8,6 +8,8 @@
 #
 # It drives the host Docker daemon through the mounted socket: task
 # containers are *siblings* on the host, not nested inside this container.
+# Each one gets its own network; `sandbox-guard` firewalls those networks off
+# from the host, the LAN and each other before the orchestrator starts.
 
 services:
   orchestrator:
@@ -22,6 +24,11 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 64m
+    # Talks to Docker over the unix socket only; needs no network itself.
+    network_mode: none
+    depends_on:
+      sandbox-guard:
+        condition: service_completed_successfully
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./jobs:/jobs:ro
@@ -29,6 +36,21 @@ services:
       # Names only: values come from the shell or .env and are forwarded to
       # task containers via `env_passthrough` in the job file.
       - ANTHROPIC_API_KEY
+      - ORCHESTRATOR_TASK_RUNTIME=${TASK_RUNTIME:-}
+      - ORCHESTRATOR_TASK_DNS=${TASK_DNS:-1.1.1.1,8.8.8.8}
+
+  # One-shot: installs the host firewall rules isolating task containers
+  # (sandbox-guard/guard.sh). Idempotent; runs before every orchestrator run.
+  sandbox-guard:
+    build: ./sandbox-guard
+    image: hostprobe/sandbox-guard:latest
+    profiles: ["orchestrator"]
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_RAW]
+    read_only: true
+    mem_limit: 32m
+    restart: "no"
 
   # Build-only service for the image task containers start from.
   opencode-runner:

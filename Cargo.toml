@@ -17,7 +17,7 @@ infrastructure = { path = "crates/infrastructure" }
 
 # External
 bollard = { version = "0.21", default-features = false, features = ["pipe"] }
-clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+clap = { version = "4", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

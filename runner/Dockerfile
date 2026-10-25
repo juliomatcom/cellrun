@@ -5,6 +5,11 @@
 #
 # Provider credentials (e.g. ANTHROPIC_API_KEY) are NOT baked in; the
 # orchestrator injects them per task via `env_passthrough`.
+#
+# Runs as root on purpose: the workload (opencode) has full access *inside*
+# its container. Isolation from the host and other tasks comes from the
+# orchestrator (own network per task, no mounts, sandbox-guard firewall,
+# optionally gVisor), not from restricting the user.
 FROM debian:bookworm-slim
 
 ARG OPENCODE_VERSION=1.19.4
@@ -24,10 +29,4 @@ RUN curl -fsSL https://opencode.ai/install \
  && rm -rf /root/.opencode \
  && opencode --version
 
-# Unprivileged user; tasks run their steps as this user in /workspace.
-RUN useradd --create-home --uid 1000 --shell /bin/bash agent \
- && mkdir /workspace \
- && chown agent:agent /workspace
-
-USER agent
 WORKDIR /workspace

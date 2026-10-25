@@ -57,6 +57,9 @@ pub struct ResourceLimits {
 }
 
 /// What container a task runs in.
+///
+/// Deliberately has no network, mount or privilege settings: every task is
+/// isolated the same way by the runtime and a job cannot opt out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSpec {
     pub image: String,
@@ -64,7 +67,6 @@ pub struct ContainerSpec {
     /// are never written into reports or events.
     pub env: Vec<(String, String)>,
     pub workdir: Option<String>,
-    pub network: Option<String>,
     pub limits: ResourceLimits,
 }
 
@@ -78,7 +80,6 @@ impl ContainerSpec {
             image,
             env: Vec::new(),
             workdir: None,
-            network: None,
             limits: ResourceLimits::default(),
         })
     }

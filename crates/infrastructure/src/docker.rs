@@ -1,7 +1,18 @@
 //! [`ContainerRuntime`] backed by the Docker Engine API over the local unix
 //! socket (no `docker` CLI processes are spawned).
+//!
+//! # Isolation
+//!
+//! Each task container is the only member of its own bridge network, whose
+//! host interface is named `hp<hex>`. The host firewall installed by
+//! `sandbox-guard` drops everything from `hp+` to the host itself and to
+//! private ranges, so a container reaches the public internet and nothing
+//! else: not the host, not the LAN, not other tasks. Containers get no
+//! mounts; inside, the workload has full (root) access. For a kernel
+//! boundary as well, set `runtime` to `runsc` (gVisor).
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,17 +20,20 @@ use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::errors::Error as DockerError;
 use bollard::exec::{CreateExecOptions, StartExecResults};
-use bollard::models::{ContainerCreateBody, HostConfig};
+use bollard::models::{ContainerCreateBody, HostConfig, NetworkCreateRequest};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    RemoveContainerOptionsBuilder,
+    ListNetworksOptionsBuilder, RemoveContainerOptionsBuilder,
 };
 use futures_util::{StreamExt, TryStreamExt};
 
 use application::{ContainerRuntime, ExecStatus, OutputObserver, RuntimeError};
 use domain::{ContainerSpec, JobId, StreamKind, TaskId};
 
-/// Label marking every container created by the orchestrator.
+/// Prefix of every task bridge interface; `sandbox-guard` firewalls `hp+`.
+pub const BRIDGE_PREFIX: &str = "hp";
+
+/// Label marking every container and network created by the orchestrator.
 pub const LABEL_MANAGED: &str = "hostprobe.orchestrator";
 pub const LABEL_JOB: &str = "hostprobe.job";
 pub const LABEL_TASK: &str = "hostprobe.task";
@@ -42,6 +56,11 @@ pub struct DockerConfig {
     pub pull: PullPolicy,
     /// Applied when a task sets no `pids` limit (fork-bomb protection).
     pub default_pids_limit: Option<u64>,
+    /// Upstream DNS for task containers. Public resolvers keep DNS working
+    /// while private ranges are firewalled off.
+    pub dns: Vec<String>,
+    /// OCI runtime for task containers, e.g. `runsc` (gVisor).
+    pub runtime: Option<String>,
 }
 
 impl Default for DockerConfig {
@@ -49,6 +68,8 @@ impl Default for DockerConfig {
         Self {
             pull: PullPolicy::Missing,
             default_pids_limit: Some(512),
+            dns: vec!["1.1.1.1".to_owned(), "8.8.8.8".to_owned()],
+            runtime: None,
         }
     }
 }
@@ -56,13 +77,19 @@ impl Default for DockerConfig {
 pub struct DockerRuntime {
     docker: Docker,
     config: DockerConfig,
+    /// container id -> its private network.
+    networks: Mutex<HashMap<String, String>>,
 }
 
 impl DockerRuntime {
     /// Connects to `$DOCKER_HOST` (unix://) or `/var/run/docker.sock`.
     pub fn connect(config: DockerConfig) -> Result<Self, RuntimeError> {
         let docker = Docker::connect_with_local_defaults().map_err(err)?;
-        Ok(Self { docker, config })
+        Ok(Self {
+            docker,
+            config,
+            networks: Mutex::new(HashMap::new()),
+        })
     }
 
     pub async fn ping(&self) -> Result<(), RuntimeError> {
@@ -93,6 +120,113 @@ impl DockerRuntime {
             _ => Ok(()),
         }
     }
+
+    async fn create_network(
+        &self,
+        name: &str,
+        bridge: &str,
+        labels: &HashMap<String, String>,
+    ) -> Result<(), RuntimeError> {
+        let request = NetworkCreateRequest {
+            name: name.to_owned(),
+            driver: Some("bridge".to_owned()),
+            enable_ipv6: Some(false),
+            options: Some(HashMap::from([
+                (
+                    "com.docker.network.bridge.name".to_owned(),
+                    bridge.to_owned(),
+                ),
+                (
+                    "com.docker.network.bridge.enable_icc".to_owned(),
+                    "false".to_owned(),
+                ),
+            ])),
+            labels: Some(labels.clone()),
+            ..Default::default()
+        };
+        self.docker
+            .create_network(request)
+            .await
+            .map(drop)
+            .map_err(|e| RuntimeError::new(format!("create network: {e}")))
+    }
+
+    async fn remove_network(&self, name: &str) -> Result<(), RuntimeError> {
+        match self.docker.remove_network(name).await {
+            Ok(()) => Ok(()),
+            Err(e) if is_not_found(&e) => Ok(()),
+            Err(e) => Err(RuntimeError::new(format!("remove network {name}: {e}"))),
+        }
+    }
+
+    async fn create_container(
+        &self,
+        name: &str,
+        labels: HashMap<String, String>,
+        spec: &ContainerSpec,
+    ) -> Result<String, RuntimeError> {
+        let limits = &spec.limits;
+        let memory = limits.memory_bytes.map(saturating_i64);
+        let host_config = HostConfig {
+            network_mode: Some(name.to_owned()),
+            dns: Some(self.config.dns.clone()),
+            runtime: self.config.runtime.clone(),
+            ipc_mode: Some("private".to_owned()),
+            init: Some(true),
+            memory,
+            // Equal to `memory` => no swap; a swapping container would starve the VM.
+            memory_swap: memory,
+            nano_cpus: limits.nano_cpus.map(saturating_i64),
+            pids_limit: limits
+                .pids
+                .or(self.config.default_pids_limit)
+                .map(saturating_i64),
+            ..Default::default()
+        };
+        let body = ContainerCreateBody {
+            image: Some(spec.image.clone()),
+            entrypoint: Some(vec!["/bin/sh".to_owned(), "-c".to_owned()]),
+            cmd: Some(vec![KEEPALIVE.to_owned()]),
+            env: Some(spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
+            working_dir: spec.workdir.clone(),
+            labels: Some(labels),
+            host_config: Some(host_config),
+            ..Default::default()
+        };
+        let options = CreateContainerOptionsBuilder::new().name(name).build();
+
+        let id = self
+            .docker
+            .create_container(Some(options), body)
+            .await
+            .map_err(err)?
+            .id;
+        if let Err(e) = self.docker.start_container(&id, None).await {
+            let _ = self.remove_container(&id).await;
+            return Err(err(e));
+        }
+        Ok(id)
+    }
+
+    async fn remove_container(&self, container_id: &str) -> Result<(), RuntimeError> {
+        let options = RemoveContainerOptionsBuilder::default()
+            .force(true)
+            .v(true)
+            .build();
+        match self
+            .docker
+            .remove_container(container_id, Some(options))
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) if is_not_found(&e) => Ok(()),
+            // 409: removal already in progress.
+            Err(DockerError::DockerResponseServerError {
+                status_code: 409, ..
+            }) => Ok(()),
+            Err(e) => Err(err(e)),
+        }
+    }
 }
 
 impl ContainerRuntime for DockerRuntime {
@@ -104,51 +238,23 @@ impl ContainerRuntime for DockerRuntime {
     ) -> Result<String, RuntimeError> {
         self.ensure_image(&spec.image).await?;
 
-        let limits = &spec.limits;
-        let memory = limits.memory_bytes.map(saturating_i64);
-        let host_config = HostConfig {
-            init: Some(true),
-            memory,
-            // Equal to `memory` => no swap; a swapping container would starve the VM.
-            memory_swap: memory,
-            nano_cpus: limits.nano_cpus.map(saturating_i64),
-            pids_limit: limits
-                .pids
-                .or(self.config.default_pids_limit)
-                .map(saturating_i64),
-            network_mode: spec.network.clone(),
-            security_opt: Some(vec!["no-new-privileges".to_owned()]),
-            ..Default::default()
-        };
         let labels = HashMap::from([
             (LABEL_MANAGED.to_owned(), "1".to_owned()),
             (LABEL_JOB.to_owned(), job.to_string()),
             (LABEL_TASK.to_owned(), task.to_string()),
         ]);
-        let body = ContainerCreateBody {
-            image: Some(spec.image.clone()),
-            entrypoint: Some(vec!["/bin/sh".to_owned(), "-c".to_owned()]),
-            cmd: Some(vec![KEEPALIVE.to_owned()]),
-            env: Some(spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
-            working_dir: spec.workdir.clone(),
-            labels: Some(labels),
-            host_config: Some(host_config),
-            ..Default::default()
-        };
-        let name = container_name(job, task);
-        let options = CreateContainerOptionsBuilder::new().name(&name).build();
-
-        let id = self
-            .docker
-            .create_container(Some(options), body)
-            .await
-            .map_err(err)?
-            .id;
-        if let Err(e) = self.docker.start_container(&id, None).await {
-            let _ = self.remove(&id).await;
-            return Err(err(e));
+        let (name, bridge) = unique_names(job, task);
+        self.create_network(&name, &bridge, &labels).await?;
+        match self.create_container(&name, labels, spec).await {
+            Ok(id) => {
+                lock(&self.networks).insert(id.clone(), name);
+                Ok(id)
+            }
+            Err(e) => {
+                let _ = self.remove_network(&name).await;
+                Err(e)
+            }
         }
-        Ok(id)
     }
 
     async fn exec(
@@ -215,22 +321,11 @@ impl ContainerRuntime for DockerRuntime {
     }
 
     async fn remove(&self, container_id: &str) -> Result<(), RuntimeError> {
-        let options = RemoveContainerOptionsBuilder::default()
-            .force(true)
-            .v(true)
-            .build();
-        match self
-            .docker
-            .remove_container(container_id, Some(options))
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(e) if is_not_found(&e) => Ok(()),
-            // 409: removal already in progress.
-            Err(DockerError::DockerResponseServerError {
-                status_code: 409, ..
-            }) => Ok(()),
-            Err(e) => Err(err(e)),
+        self.remove_container(container_id).await?;
+        let network = lock(&self.networks).remove(container_id);
+        match network {
+            Some(name) => self.remove_network(&name).await,
+            None => Ok(()),
         }
     }
 
@@ -253,8 +348,22 @@ impl ContainerRuntime for DockerRuntime {
             self.remove(&id).await?;
             removed += 1;
         }
+        // Networks left by a crashed run (their container map is gone).
+        let options = ListNetworksOptionsBuilder::new().filters(&filters).build();
+        let networks = self
+            .docker
+            .list_networks(Some(options))
+            .await
+            .map_err(err)?;
+        for name in networks.into_iter().filter_map(|n| n.name) {
+            self.remove_network(&name).await?;
+        }
         Ok(removed)
     }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn err(e: DockerError) -> RuntimeError {
@@ -285,15 +394,24 @@ fn normalize_image_ref(image: &str) -> String {
     }
 }
 
-/// `hp-<job>-<task>-<unique>`: readable in `docker ps`, unique across runs.
-fn container_name(job: &JobId, task: &TaskId) -> String {
+/// Unique names for a task's container + network (`hp-<job>-<task>-<id>`,
+/// readable in `docker ps`) and its bridge interface (`hp<id>`, which must
+/// fit Linux's 15-byte interface name limit).
+fn unique_names(job: &JobId, task: &TaskId) -> (String, String) {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or_default();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("hp-{job}-{task}-{:x}{:x}{seq:x}", std::process::id(), nanos)
+    // 52 bits of time-ish entropy mixed with pid and a counter -> 13 hex chars.
+    let id =
+        (nanos ^ (u64::from(std::process::id()) << 32) ^ seq.rotate_left(40)) & ((1 << 52) - 1);
+    let id = format!("{id:013x}");
+    (
+        format!("hp-{job}-{task}-{id}"),
+        format!("{BRIDGE_PREFIX}{id}"),
+    )
 }
 
 #[cfg(test)]
@@ -313,13 +431,16 @@ mod tests {
     }
 
     #[test]
-    fn container_names_are_unique_and_docker_safe() {
+    fn names_are_unique_and_bridge_fits_ifname_limit() {
         let job = JobId::new("j").unwrap();
         let task = TaskId::new("t").unwrap();
-        let a = container_name(&job, &task);
-        let b = container_name(&job, &task);
+        let (a, bridge_a) = unique_names(&job, &task);
+        let (b, bridge_b) = unique_names(&job, &task);
         assert_ne!(a, b);
+        assert_ne!(bridge_a, bridge_b);
         assert!(a.starts_with("hp-j-t-"));
         assert!(a.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'));
+        assert!(bridge_a.starts_with(BRIDGE_PREFIX));
+        assert_eq!(bridge_a.len(), 15, "Linux IFNAMSIZ - 1");
     }
 }

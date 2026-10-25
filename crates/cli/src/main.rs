@@ -24,8 +24,40 @@ const EXIT_INTERRUPTED: u8 = 130;
 #[derive(Parser)]
 #[command(name = "orchestrator", version)]
 struct Cli {
+    #[command(flatten)]
+    task: TaskArgs,
     #[command(subcommand)]
     command: Command,
+}
+
+/// Host-level settings for task containers (never taken from job files).
+#[derive(clap::Args)]
+struct TaskArgs {
+    /// OCI runtime for task containers, e.g. `runsc` (gVisor) for a
+    /// separate kernel between the workload and the host.
+    #[arg(long, global = true, env = "ORCHESTRATOR_TASK_RUNTIME")]
+    task_runtime: Option<String>,
+    /// DNS servers for task containers (must be public: private ranges are
+    /// firewalled off by sandbox-guard).
+    #[arg(
+        long,
+        global = true,
+        env = "ORCHESTRATOR_TASK_DNS",
+        value_delimiter = ',',
+        default_value = "1.1.1.1,8.8.8.8"
+    )]
+    task_dns: Vec<String>,
+}
+
+impl TaskArgs {
+    fn docker_config(&self, pull: PullPolicy) -> DockerConfig {
+        DockerConfig {
+            pull,
+            dns: self.task_dns.clone(),
+            runtime: self.task_runtime.clone().filter(|r| !r.is_empty()),
+            ..DockerConfig::default()
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -81,14 +113,18 @@ impl From<Pull> for PullPolicy {
 // footprint minimal on small VMs.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    match cli.command {
         Command::Run {
             job,
             events,
             report,
             pull,
             tail_bytes,
-        } => run(&job, &events, &report, pull.into(), tail_bytes).await,
+        } => {
+            let config = cli.task.docker_config(pull.into());
+            run(&job, &events, &report, config, tail_bytes).await
+        }
         Command::Validate { job } => match load_job(&job) {
             Ok(job) => {
                 println!("ok: job `{}` with {} task(s)", job.id, job.tasks.len());
@@ -96,7 +132,9 @@ async fn main() -> ExitCode {
             }
             Err(code) => code,
         },
-        Command::Cleanup { job_id } => cleanup(&job_id).await,
+        Command::Cleanup { job_id } => {
+            cleanup(&job_id, cli.task.docker_config(PullPolicy::Never)).await
+        }
     }
 }
 
@@ -104,14 +142,14 @@ async fn run(
     job: &Path,
     events: &Path,
     report: &Path,
-    pull: PullPolicy,
+    config: DockerConfig,
     tail_bytes: usize,
 ) -> ExitCode {
     let job = match load_job(job) {
         Ok(job) => job,
         Err(code) => return code,
     };
-    let runtime = match connect(pull).await {
+    let runtime = match connect(config).await {
         Ok(rt) => rt,
         Err(code) => return code,
     };
@@ -153,12 +191,12 @@ async fn run(
     }
 }
 
-async fn cleanup(job_id: &str) -> ExitCode {
+async fn cleanup(job_id: &str, config: DockerConfig) -> ExitCode {
     let job_id = match JobId::new(job_id) {
         Ok(id) => id,
         Err(e) => return fail(EXIT_BAD_INPUT, e),
     };
-    let runtime = match connect(PullPolicy::Never).await {
+    let runtime = match connect(config).await {
         Ok(rt) => rt,
         Err(code) => return code,
     };
@@ -188,11 +226,7 @@ fn load_job(path: &Path) -> Result<Job, ExitCode> {
         .map_err(|e| fail(EXIT_BAD_INPUT, format_args!("invalid job: {e}")))
 }
 
-async fn connect(pull: PullPolicy) -> Result<DockerRuntime, ExitCode> {
-    let config = DockerConfig {
-        pull,
-        ..DockerConfig::default()
-    };
+async fn connect(config: DockerConfig) -> Result<DockerRuntime, ExitCode> {
     let runtime = DockerRuntime::connect(config).map_err(|e| fail(EXIT_RUNTIME, e))?;
     runtime
         .ping()
