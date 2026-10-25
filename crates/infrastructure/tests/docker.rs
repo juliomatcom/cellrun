@@ -100,6 +100,52 @@ async fn remove_job_reaps_labelled_containers() {
 
 use std::net::UdpSocket;
 
+use bollard::Docker;
+use bollard::models::{ContainerCreateBody, HostConfig, NetworkCreateRequest};
+use bollard::query_parameters::{CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder};
+
+const BACKEND_NET: &str = "it-isolation-backend";
+const BACKEND_SVC: &str = "it-isolation-backend-svc";
+
+/// Stands in for an event bus / database on the shared service network
+/// (`hostprobe-backend` in compose). Returns its IP.
+async fn start_backend_service(docker: &Docker) -> String {
+    remove_backend_service(docker).await;
+    docker
+        .create_network(NetworkCreateRequest {
+            name: BACKEND_NET.into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let body = ContainerCreateBody {
+        image: Some(image()),
+        cmd: Some(vec!["sleep".into(), "300".into()]),
+        host_config: Some(HostConfig {
+            network_mode: Some(BACKEND_NET.into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let options = CreateContainerOptionsBuilder::new()
+        .name(BACKEND_SVC)
+        .build();
+    docker.create_container(Some(options), body).await.unwrap();
+    docker.start_container(BACKEND_SVC, None).await.unwrap();
+    let info = docker.inspect_container(BACKEND_SVC, None).await.unwrap();
+    info.network_settings
+        .and_then(|n| n.networks)
+        .and_then(|mut n| n.remove(BACKEND_NET))
+        .and_then(|e| e.ip_address)
+        .unwrap()
+}
+
+async fn remove_backend_service(docker: &Docker) {
+    let force = RemoveContainerOptionsBuilder::default().force(true).build();
+    let _ = docker.remove_container(BACKEND_SVC, Some(force)).await;
+    let _ = docker.remove_network(BACKEND_NET).await;
+}
+
 async fn sh(runtime: &DockerRuntime, id: &str, script: &str) -> String {
     let mut out = Collect::default();
     runtime
@@ -135,6 +181,8 @@ async fn task_containers_are_isolated_from_host_and_each_other() {
     let job = JobId::new("it-isolation").unwrap();
     let spec = ContainerSpec::new(image()).unwrap();
     runtime.remove_job(&job).await.unwrap(); // leftovers of a failed run
+    let docker = Docker::connect_with_local_defaults().unwrap();
+    let backend_ip = start_backend_service(&docker).await;
     let a = runtime
         .start(&job, &TaskId::new("a").unwrap(), &spec)
         .await
@@ -152,6 +200,7 @@ async fn task_containers_are_isolated_from_host_and_each_other() {
         "172.17.0.1:9".to_owned(),       // host, via docker0
         format!("{b_ip}:9"),             // the other task
         "169.254.169.254:80".to_owned(), // cloud metadata
+        format!("{backend_ip}:9"),       // services on the shared backend network
     ];
     // The host's primary address (no packet is sent by `connect`).
     if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
@@ -183,4 +232,5 @@ async fn task_containers_are_isolated_from_host_and_each_other() {
     assert_eq!(mounts.trim(), "0", "unexpected mounts");
 
     assert_eq!(runtime.remove_job(&job).await.unwrap(), 2);
+    remove_backend_service(&docker).await;
 }

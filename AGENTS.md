@@ -108,8 +108,10 @@ Changing a wire format is a breaking change: update README and tests together.
   the guard having completed) and build-only `opencode-runner`.
 - The orchestrator container talks to the **host** daemon through the
   mounted socket, runs as uid 65532 with `group_add: ${DOCKER_GID}`,
-  `network_mode: none`, read-only rootfs, no caps, `mem_limit: 64m`.
-  Task containers are siblings on the host.
+  read-only rootfs, no caps, `mem_limit: 64m`. It joins the shared
+  `hostprobe-backend` network to reach event bus / database services.
+  Task containers are siblings on the host and cannot reach that network
+  (verified by the isolation integration test).
 - Job files: `jobs/` is mounted read-only at `/jobs`. Report → stdout, events
   → stderr (container fs is read-only; redirect on the host).
 - `init: true` forwards SIGTERM (`docker stop`, `compose down`) so the

@@ -24,8 +24,10 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 64m
-    # Talks to Docker over the unix socket only; needs no network itself.
-    network_mode: none
+    # Shared with event bus / database services. Task containers can never
+    # reach it: they live on their own `hp*` bridges, which sandbox-guard
+    # firewalls off from all private ranges (and Docker isolates bridges).
+    networks: [backend]
     depends_on:
       sandbox-guard:
         condition: service_completed_successfully
@@ -58,3 +60,9 @@ services:
     image: hostprobe/opencode-runner:latest
     profiles: ["orchestrator"]
     entrypoint: ["true"]
+
+networks:
+  # Repo-wide service network. Any app that needs it declares it with this
+  # exact definition; Compose merges identical declarations across includes.
+  backend:
+    name: hostprobe-backend

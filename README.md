@@ -46,9 +46,10 @@ docker compose --progress quiet run --rm -T orchestrator run /examples/hello.jso
   listed under `environment:` in [`compose.yaml`](compose.yaml)); empty
   values are rejected.
 - `sandbox-guard` runs first automatically and installs the firewall rules
-  (idempotent). The orchestrator itself has no network; it drives the host's
-  Docker daemon via the mounted socket as a non-root user in the docker
-  group. `docker stop` / Ctrl-C removes all task containers and networks.
+  (idempotent). The orchestrator drives the host's Docker daemon via the
+  mounted socket as a non-root user in the docker group, and sits on the
+  shared `hostprobe-backend` network to reach services such as an event bus
+  or database. Task containers cannot reach that network. `docker stop` / Ctrl-C removes all task containers and networks.
 
 ## Quick start (bare binary)
 
