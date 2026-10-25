@@ -33,7 +33,7 @@ pub enum InputError {
     },
     #[error("task `{task}`: no image (set `image` on the task or in `defaults`)")]
     MissingImage { task: String },
-    #[error("task `{task}`: env var `{var}` listed in env_passthrough is not set")]
+    #[error("task `{task}`: env var `{var}` listed in env_passthrough is not set or empty")]
     MissingEnv { task: String, var: String },
     #[error("task `{task}`: {message}")]
     Limit { task: String, message: &'static str },
@@ -143,10 +143,15 @@ fn to_task(
 
     let mut env = defaults.env.clone();
     for name in defaults.env_passthrough.iter().chain(&c.env_passthrough) {
-        let value = lookup_env(name).ok_or_else(|| InputError::MissingEnv {
-            task: id.to_string(),
-            var: name.clone(),
-        })?;
+        // Empty counts as missing: a blank API key should fail fast, not
+        // later inside the container.
+        let value =
+            lookup_env(name)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| InputError::MissingEnv {
+                    task: id.to_string(),
+                    var: name.clone(),
+                })?;
         env.insert(name.clone(), value);
     }
     env.extend(c.env);
@@ -206,7 +211,11 @@ mod tests {
     use super::*;
 
     fn env(name: &str) -> Option<String> {
-        (name == "API_KEY").then(|| "secret".to_owned())
+        match name {
+            "API_KEY" => Some("secret".to_owned()),
+            "BLANK" => Some(String::new()),
+            _ => None,
+        }
     }
 
     #[test]
@@ -271,6 +280,11 @@ mod tests {
             br#"{"tasks":[{"id":"t","image":"x","env_passthrough":["NOPE"],"steps":["ls"]}]}"#;
         assert!(
             matches!(parse_job(json, env), Err(InputError::MissingEnv { var, .. }) if var == "NOPE")
+        );
+        let json =
+            br#"{"tasks":[{"id":"t","image":"x","env_passthrough":["BLANK"],"steps":["ls"]}]}"#;
+        assert!(
+            matches!(parse_job(json, env), Err(InputError::MissingEnv { var, .. }) if var == "BLANK")
         );
     }
 

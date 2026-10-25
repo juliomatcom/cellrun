@@ -1,0 +1,38 @@
+# Included from the repo root compose.yaml; paths are relative to this file.
+#
+# The orchestrator is a run-to-completion CLI, so it sits behind the
+# `orchestrator` profile and is started on demand:
+#
+#   docker compose --profile orchestrator build
+#   docker compose run --rm -T orchestrator run /examples/hello.json > report.json
+#
+# It drives the host Docker daemon through the mounted socket: task
+# containers are *siblings* on the host, not nested inside this container.
+
+services:
+  orchestrator:
+    build: .
+    image: hostprobe/orchestrator:latest
+    profiles: ["orchestrator"]
+    init: true
+    user: "65532:65532"
+    # Socket access without root: join the host's docker group.
+    group_add: ["${DOCKER_GID:?set DOCKER_GID in .env (stat -c %g /var/run/docker.sock)}"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./jobs:/jobs:ro
+    environment:
+      # Names only: values come from the shell or .env and are forwarded to
+      # task containers via `env_passthrough` in the job file.
+      - ANTHROPIC_API_KEY
+
+  # Build-only service for the image task containers start from.
+  opencode-runner:
+    build: ./runner
+    image: hostprobe/opencode-runner:latest
+    profiles: ["orchestrator"]
+    entrypoint: ["true"]

@@ -1,0 +1,4 @@
+target/
+runner/
+**/*.md
+!README.md

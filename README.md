@@ -7,7 +7,28 @@ every output line as NDJSON, and writes a JSON report. Built for small VMs
 MiB RSS, bounded output buffers, no `docker` CLI processes (talks to the
 Engine API over `/var/run/docker.sock`).
 
-## Quick start
+## Quick start (Docker Compose, recommended)
+
+From the repo root:
+
+```sh
+cp .env.example .env    # set DOCKER_GID (stat -c %g /var/run/docker.sock) and API keys
+docker compose --profile orchestrator build            # orchestrator + opencode runner images
+docker compose --progress quiet run --rm -T orchestrator run /examples/hello.json \
+  > report.json 2> events.ndjson
+```
+
+- Put your own job files in [`jobs/`](jobs) → available at `/jobs/<file>.json`.
+- `-T` keeps stdout (report) and stderr (events) separate; `--progress quiet`
+  keeps Compose's own messages out of the event stream.
+- Variables listed in the job's `env_passthrough` must be set in `.env` (and
+  listed under `environment:` in [`compose.yaml`](compose.yaml)); empty
+  values are rejected.
+- The orchestrator uses the host's Docker daemon via the mounted socket, as a
+  non-root user in the docker group. `docker stop` / Ctrl-C removes all task
+  containers it started.
+
+## Quick start (bare binary)
 
 ```sh
 cd apps/orchestrator
@@ -113,7 +134,7 @@ time via `env_passthrough`, never baked into the image.
 
 ## Memory sizing on a 1 GiB VM
 
-The orchestrator itself needs a few MiB. Budget the rest as
+The orchestrator itself needs a few MiB (compose caps it at 64 MiB). Budget the rest as
 `max_parallel × memory_mb` + Docker daemon (~100 MiB) + OS. E.g.
 `max_parallel: 2`, `memory_mb: 384` leaves comfortable headroom.
 

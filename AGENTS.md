@@ -68,6 +68,23 @@ a dependency on an outer crate or on forbidden tech (e.g. `serde` in
 
 Changing a wire format is a breaking change: update README and tests together.
 
+## Deployment (Docker Compose)
+
+- `Dockerfile`: multi-stage, `rust:1-slim-bookworm` build → 
+  `gcr.io/distroless/cc-debian12:nonroot` runtime (~40 MB, no shell).
+  Examples are baked in at `/examples`.
+- `compose.yaml` (included by the repo root): services `orchestrator` and
+  build-only `opencode-runner`, both under profile `orchestrator` because the
+  orchestrator is a run-to-completion CLI.
+- The container talks to the **host** daemon through the mounted socket, runs
+  as uid 65532 with `group_add: ${DOCKER_GID}`, read-only rootfs, no caps,
+  `mem_limit: 64m`. Task containers are siblings on the host; if you ever add
+  bind mounts to task containers, they must be host paths.
+- Job files: `jobs/` is mounted read-only at `/jobs`. Report → stdout, events
+  → stderr (container fs is read-only; redirect on the host).
+- `init: true` forwards SIGTERM (`docker stop`, `compose down`) so the
+  orchestrator reaps its task containers.
+
 ## Commands
 
 ```sh
@@ -78,6 +95,11 @@ cargo test                                                   # unit + architectu
 cargo test -p infrastructure --test docker -- --ignored      # needs Docker
 cargo build --release                                        # target/release/orchestrator
 docker build -t hostprobe/opencode-runner:latest runner      # task image
+
+# via compose, from the repo root
+docker compose --profile orchestrator build
+docker compose --progress quiet run --rm -T orchestrator run /examples/hello.json \
+  > report.json 2> events.ndjson
 ```
 
 ## Conventions
