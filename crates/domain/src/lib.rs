@@ -14,4 +14,4 @@ pub use error::ValidationError;
 pub use event::{Event, StreamKind};
 pub use job::{ContainerSpec, Job, JobId, ResourceLimits, Step, Task, TaskId};
 pub use output::{LineSplitter, TailBuffer};
-pub use report::{JobReport, StepOutcome, StepReport, TaskReport, TaskStatus};
+pub use report::{JobReport, MemoryUsage, StepOutcome, StepReport, TaskReport, TaskStatus};

@@ -8,7 +8,8 @@ use application::{
     ContainerRuntime, EventSink, ExecStatus, OutputLimits, OutputObserver, RunJob, RuntimeError,
 };
 use domain::{
-    ContainerSpec, Event, Job, JobId, Step, StepOutcome, StreamKind, Task, TaskId, TaskStatus,
+    ContainerSpec, Event, Job, JobId, MemoryUsage, Step, StepOutcome, StreamKind, Task, TaskId,
+    TaskStatus,
 };
 
 /// What the fake runtime does for a given command.
@@ -96,6 +97,17 @@ impl ContainerRuntime for FakeRuntime {
         script.result.map_err(RuntimeError::new)
     }
 
+    async fn memory_usage(&self, container_id: &str) -> Result<MemoryUsage, RuntimeError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("memory {container_id}"));
+        Ok(MemoryUsage {
+            peak_bytes: Some(1 << 20),
+            ..MemoryUsage::default()
+        })
+    }
+
     async fn remove(&self, container_id: &str) -> Result<(), RuntimeError> {
         self.live.fetch_sub(1, Ordering::SeqCst);
         self.calls
@@ -178,11 +190,18 @@ async fn runs_steps_in_order_streams_lines_and_removes_container() {
     assert!(report.succeeded());
     let t = &report.tasks[0];
     assert_eq!(t.container_id.as_deref(), Some("c-t"));
+    assert_eq!(t.memory.and_then(|m| m.peak_bytes), Some(1 << 20));
     assert_eq!(t.steps[0].stdout_tail, "hello\nworld");
     assert_eq!(t.steps[0].stdout_bytes, 11);
     assert_eq!(
         runtime.calls(),
-        ["start t", "exec c-t a", "exec c-t b", "remove c-t"]
+        [
+            "start t",
+            "exec c-t a",
+            "exec c-t b",
+            "memory c-t",
+            "remove c-t"
+        ]
     );
     let events = sink.0.lock().unwrap();
     assert_eq!(events[0], "out t#0 Stdout hello");
@@ -210,7 +229,10 @@ async fn failure_skips_remaining_steps_but_still_cleans_up() {
     assert_eq!(t.steps[0].outcome, StepOutcome::Failed { exit_code: 2 });
     assert_eq!(t.steps[0].stderr_tail, "boom\n");
     assert_eq!(t.steps[1].outcome, StepOutcome::Skipped);
-    assert_eq!(runtime.calls(), ["start t", "exec c-t bad", "remove c-t"]);
+    assert_eq!(
+        runtime.calls(),
+        ["start t", "exec c-t bad", "memory c-t", "remove c-t"]
+    );
     assert!(!report.succeeded());
 }
 
@@ -250,7 +272,10 @@ async fn timeout_halts_task_even_with_continue_on_error() {
 
     assert_eq!(report.tasks[0].status, TaskStatus::Failed);
     assert_eq!(report.tasks[0].steps[1].outcome, StepOutcome::Skipped);
-    assert_eq!(runtime.calls(), ["start t", "exec c-t slow", "remove c-t"]);
+    assert_eq!(
+        runtime.calls(),
+        ["start t", "exec c-t slow", "memory c-t", "remove c-t"]
+    );
 }
 
 #[tokio::test]

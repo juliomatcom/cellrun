@@ -95,15 +95,16 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
         let container_id = match self.runtime.start(job, &task.id, &task.container).await {
             Ok(id) => id,
             Err(err) => {
-                let message = format!("failed to start container: {err}");
-                return self.finish_task(
-                    task,
-                    None,
-                    TaskStatus::Error,
-                    Some(message),
-                    vec![],
-                    started,
-                );
+                return self.finish_task(TaskReport {
+                    id: task.id.clone(),
+                    image: image.to_owned(),
+                    container_id: None,
+                    status: TaskStatus::Error,
+                    error: Some(format!("failed to start container: {err}")),
+                    duration: started.elapsed(),
+                    memory: None,
+                    steps: vec![],
+                });
             }
         };
         self.sink.emit(&Event::ContainerReady {
@@ -148,6 +149,20 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
             steps.push(report);
         }
 
+        // Measured before removal, whatever the outcome: a failed or
+        // OOM-killed task is exactly when memory numbers matter most.
+        let memory = match self.runtime.memory_usage(&container_id).await {
+            Ok(usage) => Some(usage),
+            Err(err) => {
+                let message = format!("could not read memory usage: {err}");
+                self.sink.emit(&Event::Warning {
+                    task: Some(&task.id),
+                    message: &message,
+                });
+                None
+            }
+        };
+
         if let Err(err) = self.runtime.remove(&container_id).await {
             let message = format!("failed to remove container {container_id}: {err}");
             self.sink.emit(&Event::Warning {
@@ -156,35 +171,28 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
             });
         }
 
-        let status = TaskReport::status_from_steps(&steps, |i| task.steps[i].continue_on_error);
-        self.finish_task(task, Some(container_id), status, None, steps, started)
+        self.finish_task(TaskReport {
+            id: task.id.clone(),
+            image: image.to_owned(),
+            container_id: Some(container_id),
+            status: TaskReport::status_from_steps(&steps, |i| task.steps[i].continue_on_error),
+            error: None,
+            duration: started.elapsed(),
+            memory,
+            steps,
+        })
     }
 
-    fn finish_task(
-        &self,
-        task: &Task,
-        container_id: Option<String>,
-        status: TaskStatus,
-        error: Option<String>,
-        steps: Vec<StepReport>,
-        started: Instant,
-    ) -> TaskReport {
-        let duration = started.elapsed();
+    /// Emits `task_finished` for a completed report and hands it back.
+    fn finish_task(&self, report: TaskReport) -> TaskReport {
         self.sink.emit(&Event::TaskFinished {
-            task: &task.id,
-            status,
-            duration,
-            error: error.as_deref(),
+            task: &report.id,
+            status: report.status,
+            duration: report.duration,
+            error: report.error.as_deref(),
+            memory: report.memory.as_ref(),
         });
-        TaskReport {
-            id: task.id.clone(),
-            image: task.container.image.clone(),
-            container_id,
-            status,
-            error,
-            duration,
-            steps,
-        }
+        report
     }
 }
 

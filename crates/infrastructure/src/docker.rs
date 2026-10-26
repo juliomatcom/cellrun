@@ -28,7 +28,7 @@ use bollard::query_parameters::{
 use futures_util::{StreamExt, TryStreamExt};
 
 use application::{ContainerRuntime, ExecStatus, OutputObserver, RuntimeError};
-use domain::{ContainerSpec, JobId, StreamKind, TaskId};
+use domain::{ContainerSpec, JobId, MemoryUsage, StreamKind, TaskId};
 
 /// Prefix of every task bridge interface; `sandbox-guard` firewalls `hp+`.
 pub const BRIDGE_PREFIX: &str = "hp";
@@ -337,6 +337,19 @@ impl ContainerRuntime for DockerRuntime {
         ))
     }
 
+    async fn memory_usage(&self, container_id: &str) -> Result<MemoryUsage, RuntimeError> {
+        let mut out = Collect::default();
+        match self
+            .exec(container_id, READ_MEMORY, Duration::from_secs(5), &mut out)
+            .await?
+        {
+            ExecStatus::Exited(0) => Ok(parse_memory(&String::from_utf8_lossy(&out.0))),
+            other => Err(RuntimeError::new(format!(
+                "memory probe ended with {other:?}"
+            ))),
+        }
+    }
+
     async fn remove(&self, container_id: &str) -> Result<(), RuntimeError> {
         self.remove_container(container_id).await?;
         let network = lock(&self.networks).remove(container_id);
@@ -393,6 +406,47 @@ impl DockerRuntime {
             }
         }
         first_err.map_or(Ok(removed), Err)
+    }
+}
+
+/// Prints the container's cgroup v2 memory counters as `key value` lines.
+/// Shell builtins only (no `cat`/`grep`), so any image with `/bin/sh` works;
+/// missing files (cgroup v1, gVisor) just yield fewer lines.
+const READ_MEMORY: &str = "cd /sys/fs/cgroup 2>/dev/null || exit 0; \
+    for f in memory.peak memory.swap.peak; do \
+      [ -r $f ] && read v < $f && echo \"$f $v\"; \
+    done; \
+    [ -r memory.events ] && while read k v; do \
+      [ \"$k\" = oom_kill ] && echo \"oom_kill $v\"; \
+    done < memory.events; \
+    exit 0";
+
+fn parse_memory(text: &str) -> MemoryUsage {
+    let mut usage = MemoryUsage::default();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(' ') else {
+            continue;
+        };
+        let value = value.trim().parse().ok();
+        match key {
+            "memory.peak" => usage.peak_bytes = value,
+            "memory.swap.peak" => usage.swap_peak_bytes = value,
+            "oom_kill" => usage.oom_kills = value,
+            _ => {}
+        }
+    }
+    usage
+}
+
+/// Buffers a short command's stdout (the memory probe prints < 100 bytes).
+#[derive(Default)]
+struct Collect(Vec<u8>);
+
+impl OutputObserver for Collect {
+    fn on_output(&mut self, stream: StreamKind, chunk: &[u8]) {
+        if stream == StreamKind::Stdout && self.0.len() < 4096 {
+            self.0.extend_from_slice(chunk);
+        }
     }
 }
 
@@ -456,6 +510,21 @@ fn unique_hex() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_cgroup_memory_counters() {
+        let usage = parse_memory("memory.peak 157286400\nmemory.swap.peak 0\noom_kill 1\n");
+        assert_eq!(
+            usage,
+            MemoryUsage {
+                peak_bytes: Some(157_286_400),
+                swap_peak_bytes: Some(0),
+                oom_kills: Some(1),
+            }
+        );
+        // cgroup v1 / gVisor: nothing readable.
+        assert_eq!(parse_memory(""), MemoryUsage::default());
+    }
 
     #[test]
     fn image_refs_get_explicit_tag() {

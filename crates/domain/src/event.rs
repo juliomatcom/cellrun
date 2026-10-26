@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::job::{JobId, TaskId};
-use crate::report::{StepOutcome, TaskStatus};
+use crate::report::{MemoryUsage, StepOutcome, TaskStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamKind {
@@ -47,6 +47,7 @@ pub enum Event<'a> {
         status: TaskStatus,
         duration: Duration,
         error: Option<&'a str>,
+        memory: Option<&'a MemoryUsage>,
     },
     JobFinished {
         job: &'a JobId,

@@ -73,7 +73,8 @@ a dependency on an outer crate or on forbidden tech (e.g. `serde` in
   `spawn` per line/chunk; never collect unbounded output.
 - Per task: `start` (pull if needed, create with limits + labels, start
   `sleep infinity` under `--init`) → `exec` each step with `/bin/sh -c` →
-  `remove` (always). Steps share the container, so files persist across steps.
+  `memory_usage` (cgroup v2 peak RAM/swap + OOM kills, via a shell-builtin
+  exec; always, failures become a warning) → `remove` (always). Steps share the container, so files persist across steps.
 - A failed step halts the task (remaining steps `skipped`) unless
   `continue_on_error`. A timeout always halts and fails the task
   (`StepOutcome::halts_task`): Docker cannot kill an exec'd process, so the

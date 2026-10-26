@@ -4,7 +4,7 @@ use std::io::Write;
 
 use serde::Serialize;
 
-use domain::{JobReport, StepOutcome, StepReport, TaskReport, TaskStatus};
+use domain::{JobReport, MemoryUsage, StepOutcome, StepReport, TaskReport, TaskStatus};
 
 #[derive(Serialize)]
 struct JobDto<'a> {
@@ -24,7 +24,27 @@ struct TaskDto<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
     duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory: Option<MemoryDto>,
     steps: Vec<StepDto<'a>>,
+}
+
+/// Bytes, like `stdout_bytes`; a field is `null` when unknown.
+#[derive(Serialize)]
+pub(crate) struct MemoryDto {
+    pub peak_bytes: Option<u64>,
+    pub swap_peak_bytes: Option<u64>,
+    pub oom_kills: Option<u64>,
+}
+
+impl From<&MemoryUsage> for MemoryDto {
+    fn from(m: &MemoryUsage) -> Self {
+        Self {
+            peak_bytes: m.peak_bytes,
+            swap_peak_bytes: m.swap_peak_bytes,
+            oom_kills: m.oom_kills,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -96,6 +116,7 @@ impl<'a> From<&'a TaskReport> for TaskDto<'a> {
             container_id: t.container_id.as_deref(),
             error: t.error.as_deref(),
             duration_ms: t.duration.as_millis(),
+            memory: t.memory.as_ref().map(Into::into),
             steps: t.steps.iter().map(Into::into).collect(),
         }
     }
@@ -134,6 +155,11 @@ mod tests {
                 status: TaskStatus::Failed,
                 error: None,
                 duration: Duration::from_millis(1200),
+                memory: Some(MemoryUsage {
+                    peak_bytes: Some(150 << 20),
+                    swap_peak_bytes: Some(0),
+                    oom_kills: None,
+                }),
                 steps: vec![
                     StepReport {
                         outcome: StepOutcome::Failed { exit_code: 3 },
@@ -155,6 +181,9 @@ mod tests {
         assert_eq!(task["status"], "failed");
         assert_eq!(task["container_id"], "abc");
         assert!(task.get("error").is_none());
+        assert_eq!(task["memory"]["peak_bytes"], 150 << 20);
+        assert_eq!(task["memory"]["swap_peak_bytes"], 0);
+        assert!(task["memory"]["oom_kills"].is_null());
         assert_eq!(task["steps"][0]["status"], "failed");
         assert_eq!(task["steps"][0]["exit_code"], 3);
         assert_eq!(task["steps"][0]["stdout_tail"], "out");

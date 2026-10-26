@@ -2,7 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use domain::{ContainerSpec, Event, JobId, StreamKind, TaskId};
+use domain::{ContainerSpec, Event, JobId, MemoryUsage, StreamKind, TaskId};
 
 /// Error reported by a [`ContainerRuntime`] implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +57,12 @@ pub trait ContainerRuntime: Send + Sync {
         observer: &mut dyn OutputObserver,
     ) -> impl Future<Output = Result<ExecStatus, RuntimeError>> + Send;
 
+    /// Peak memory the container has used so far (all its processes).
+    fn memory_usage(
+        &self,
+        container_id: &str,
+    ) -> impl Future<Output = Result<MemoryUsage, RuntimeError>> + Send;
+
     /// Force-removes the container and its network. Must be idempotent.
     fn remove(&self, container_id: &str) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
@@ -100,6 +106,13 @@ impl<T: ContainerRuntime + ?Sized> ContainerRuntime for &T {
         observer: &mut dyn OutputObserver,
     ) -> impl Future<Output = Result<ExecStatus, RuntimeError>> + Send {
         (**self).exec(container_id, command, timeout, observer)
+    }
+
+    fn memory_usage(
+        &self,
+        container_id: &str,
+    ) -> impl Future<Output = Result<MemoryUsage, RuntimeError>> + Send {
+        (**self).memory_usage(container_id)
     }
 
     fn remove(&self, container_id: &str) -> impl Future<Output = Result<(), RuntimeError>> + Send {

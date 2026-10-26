@@ -69,6 +69,19 @@ pub enum TaskStatus {
     Error,
 }
 
+/// Memory a task's container used over its whole life (all steps), read
+/// just before it is removed. Fields are `None` when the runtime cannot
+/// report them (e.g. no cgroup v2 inside the container).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemoryUsage {
+    /// Peak RAM, including reclaimable page cache.
+    pub peak_bytes: Option<u64>,
+    /// Peak swap used on top of RAM.
+    pub swap_peak_bytes: Option<u64>,
+    /// Processes killed for hitting the limit (an exit code 137 cause).
+    pub oom_kills: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskReport {
     pub id: TaskId,
@@ -77,6 +90,8 @@ pub struct TaskReport {
     pub status: TaskStatus,
     pub error: Option<String>,
     pub duration: Duration,
+    /// `None` when the container never started or could not be measured.
+    pub memory: Option<MemoryUsage>,
     pub steps: Vec<StepReport>,
 }
 

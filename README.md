@@ -158,6 +158,19 @@ One Goose task, OpenAI:
 }
 ```
 
+To measure tokens, run Goose with `--output-format json` and print its
+`metadata` (the step keeps Goose's exit code):
+
+```sh
+goose run --no-session --quiet --output-format json --provider openai --model gpt-6-luna \
+  --with-builtin developer -t '...' > /tmp/goose.json; rc=$?
+jq -c '{tokens: .metadata}' /tmp/goose.json; exit $rc
+```
+
+The step's output (event and `stdout_tail`) then ends with e.g.
+`{"tokens":{"total_tokens":9169,"input_tokens":8952,"output_tokens":217,"cache_read_input_tokens":5849,"cache_write_input_tokens":3094,"cost_usd":0.00055464,"status":"completed"}}`
+(the fizzbuzz task). `cost_usd` is Goose's estimate from its price table.
+
 Same task on an open-weight model: change the step's `--provider`/`--model`
 and pass that provider's key, e.g. OpenRouter
 (`"env_passthrough": ["OPENROUTER_API_KEY"]`,
@@ -178,7 +191,7 @@ One JSON object per line, flushed per line:
 {"ts_ms":1792955030653,"event":"step_started","task":"ok","step":0,"name":"step-0"}
 {"ts_ms":1792955030709,"event":"output","task":"ok","step":0,"stream":"stdout","line":"hola"}
 {"ts_ms":1792955030713,"event":"step_finished","task":"ok","step":0,"status":"succeeded","exit_code":0,"duration_ms":60}
-{"ts_ms":1792955031000,"event":"task_finished","task":"ok","status":"succeeded","duration_ms":756}
+{"ts_ms":1792955031000,"event":"task_finished","task":"ok","status":"succeeded","duration_ms":756,"memory":{"peak_bytes":6832128,"swap_peak_bytes":0,"oom_kills":0}}
 {"ts_ms":1792955032346,"event":"job_finished","job":"smoke","succeeded":false,"duration_ms":2102}
 ```
 
@@ -194,6 +207,7 @@ Task `status`: `succeeded`, `failed`, `error` (+`error`, e.g. image pull failed)
   "tasks": [{
     "id": "ok", "image": "debian:bookworm-slim", "status": "succeeded",
     "container_id": "300f...", "duration_ms": 756,
+    "memory": { "peak_bytes": 6832128, "swap_peak_bytes": 0, "oom_kills": 0 },
     "steps": [{
       "name": "step-0", "status": "succeeded", "exit_code": 0, "duration_ms": 60,
       "stdout_tail": "hola\n/tmp\n", "stderr_tail": "err\n",
@@ -205,6 +219,21 @@ Task `status`: `succeeded`, `failed`, `error` (+`error`, e.g. image pull failed)
 
 `*_tail` holds the last `--tail-bytes` (default 16 KiB) of each stream;
 `*_bytes` is the full size. The complete output is in the events stream.
+
+`memory` is recorded for every task that got a container, whatever its
+outcome, and also appears on its `task_finished` event. It is read from the
+container's cgroup v2 counters just before removal, so it covers all steps:
+
+| Field | Source | Meaning |
+|---|---|---|
+| `peak_bytes` | `memory.peak` | peak RAM, incl. reclaimable page cache |
+| `swap_peak_bytes` | `memory.swap.peak` | peak swap used beyond RAM |
+| `oom_kills` | `memory.events` | processes killed at the limit (exit code 137) |
+
+A field is `null` when the runtime does not expose it (e.g. some gVisor
+setups); if the read fails entirely, `memory` is omitted and a `warning`
+event explains why. Example: a task with `memory_mb: 32` that allocates
+100 MiB ends with `exit_code: 137` and `"oom_kills": 1`.
 
 ## Runner image
 

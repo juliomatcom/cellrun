@@ -10,7 +10,7 @@ use serde::Serialize;
 use application::EventSink;
 use domain::{Event, StreamKind};
 
-use crate::report_json::{OutcomeDto, task_status};
+use crate::report_json::{MemoryDto, OutcomeDto, task_status};
 
 pub struct NdjsonSink<W: Write> {
     out: Mutex<LineWriter<W>>,
@@ -76,6 +76,8 @@ enum EventDto<'a> {
         duration_ms: u128,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memory: Option<MemoryDto>,
     },
     JobFinished {
         job: &'a str,
@@ -139,11 +141,13 @@ impl<'a> From<&'a Event<'a>> for EventDto<'a> {
                 status,
                 duration,
                 error,
+                memory,
             } => Self::TaskFinished {
                 task: task.as_str(),
                 status: task_status(status),
                 duration_ms: duration.as_millis(),
                 error,
+                memory: memory.map(Into::into),
             },
             Event::JobFinished {
                 job,
