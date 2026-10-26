@@ -155,7 +155,7 @@ impl DockerRuntime {
             .map(drop)
             .map_err(|e| {
                 let hint = if e.to_string().contains("address pools") {
-                    " (Docker's address pools are exhausted: lower max_parallel, run \
+                    " (Docker's address pools are exhausted: lower ORCHESTRATOR_MAX_PARALLEL, run \
                      `orchestrator cleanup <job>` for leftovers, or configure smaller \
                      `default-address-pools` in daemon.json, see README)"
                 } else {
@@ -188,8 +188,10 @@ impl DockerRuntime {
             ipc_mode: Some("private".to_owned()),
             init: Some(true),
             memory,
-            // Equal to `memory` => no swap; a swapping container would starve the VM.
-            memory_swap: memory,
+            // Docker's `memory_swap` is RAM + swap; equal to `memory` => no swap.
+            memory_swap: limits
+                .memory_bytes
+                .map(|m| saturating_i64(m.saturating_add(limits.swap_bytes.unwrap_or(0)))),
             nano_cpus: limits.nano_cpus.map(saturating_i64),
             pids_limit: limits
                 .pids

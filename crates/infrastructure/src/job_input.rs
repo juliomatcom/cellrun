@@ -3,11 +3,10 @@
 //! ```json
 //! {
 //!   "id": "demo",
-//!   "max_parallel": 2,
-//!   "defaults": { "image": "hostprobe/opencode-runner:latest",
-//!                 "env_passthrough": ["ANTHROPIC_API_KEY"], "memory_mb": 512 },
+//!   "defaults": { "image": "hostprobe/goose-runner:latest",
+//!                 "env_passthrough": ["OPENAI_API_KEY"], "memory_mb": 256 },
 //!   "tasks": [
-//!     { "id": "hello", "steps": ["echo hi", { "run": "opencode run 'fix bug'", "timeout_secs": 900 }] }
+//!     { "id": "hello", "steps": ["echo hi", { "run": "goose run -t 'fix bug'", "timeout_secs": 900 }] }
 //!   ]
 //! }
 //! ```
@@ -19,8 +18,12 @@ use serde::Deserialize;
 
 use domain::{ContainerSpec, Job, JobId, ResourceLimits, Step, Task, TaskId, ValidationError};
 
-const DEFAULT_MAX_PARALLEL: usize = 2;
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
+/// Swap granted on top of `memory_mb` when the job does not say otherwise.
+const DEFAULT_SWAP_MB: u64 = 1024;
+/// Per-task swap ceiling: enough headroom for spikes without letting one
+/// task fill the host's swap.
+const MAX_SWAP_MB: u64 = 2048;
 
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
@@ -44,8 +47,6 @@ pub enum InputError {
 struct JobDto {
     #[serde(default = "default_job_id")]
     id: String,
-    #[serde(default = "default_max_parallel")]
-    max_parallel: usize,
     #[serde(default)]
     defaults: ContainerDto,
     tasks: Vec<TaskDto>,
@@ -64,6 +65,8 @@ struct ContainerDto {
     env_passthrough: Vec<String>,
     workdir: Option<String>,
     memory_mb: Option<u64>,
+    /// Swap on top of `memory_mb`; omitted means `DEFAULT_SWAP_MB`, 0 means none.
+    swap_mb: Option<u64>,
     cpus: Option<f64>,
     pids: Option<u64>,
     timeout_secs: Option<u64>,
@@ -95,10 +98,6 @@ fn default_job_id() -> String {
     "job".to_owned()
 }
 
-fn default_max_parallel() -> usize {
-    DEFAULT_MAX_PARALLEL
-}
-
 /// Parses and validates a job. `lookup_env` resolves `env_passthrough`
 /// names (injected so tests don't touch the process environment).
 pub fn parse_job(
@@ -114,7 +113,7 @@ pub fn parse_job(
         .into_iter()
         .map(|t| to_task(t, &dto.defaults, &lookup_env))
         .collect::<Result<Vec<_>, _>>()?;
-    Job::new(job_id, dto.max_parallel, tasks).map_err(invalid("job".into()))
+    Job::new(job_id, tasks).map_err(invalid("job".into()))
 }
 
 fn to_task(
@@ -178,6 +177,14 @@ fn to_task(
             "`memory_mb` and `pids` must be greater than zero",
         ));
     }
+    // Swap only extends a memory limit; without one Docker ignores it.
+    let swap_mb = c.swap_mb.or(defaults.swap_mb);
+    if swap_mb.is_some() && memory_mb.is_none() {
+        return Err(limit_err("`swap_mb` requires `memory_mb`"));
+    }
+    if swap_mb.is_some_and(|mb| mb > MAX_SWAP_MB) {
+        return Err(limit_err("`swap_mb` must be at most 2048"));
+    }
     let cpus = c.cpus.or(defaults.cpus);
     if cpus.is_some_and(|v| !(v.is_finite() && v > 0.0)) {
         return Err(limit_err("`cpus` must be a positive number"));
@@ -189,6 +196,10 @@ fn to_task(
                     .ok_or_else(|| limit_err("`memory_mb` too large"))
             })
             .transpose()?,
+        swap_bytes: memory_mb
+            .map(|_| swap_mb.unwrap_or(DEFAULT_SWAP_MB))
+            .filter(|&mb| mb > 0)
+            .map(|mb| mb * 1024 * 1024),
         nano_cpus: cpus.map(|v| (v * 1e9) as u64),
         pids,
     };
@@ -239,7 +250,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(job.id.as_str(), "job");
-        assert_eq!(job.max_parallel, DEFAULT_MAX_PARALLEL);
         let step = &job.tasks[0].steps[0];
         assert_eq!(step.name, "step-0");
         assert_eq!(step.run, "echo hi");
@@ -247,11 +257,33 @@ mod tests {
     }
 
     #[test]
+    fn swap_defaults_to_1gib_with_a_memory_limit() {
+        let swap = |json: &str| {
+            parse_job(json.as_bytes(), env).unwrap().tasks[0]
+                .container
+                .limits
+                .swap_bytes
+        };
+        assert_eq!(
+            swap(r#"{"tasks":[{"id":"t","image":"x","memory_mb":64,"steps":["ls"]}]}"#),
+            Some(DEFAULT_SWAP_MB * 1024 * 1024)
+        );
+        assert_eq!(
+            swap(r#"{"tasks":[{"id":"t","image":"x","memory_mb":64,"swap_mb":0,"steps":["ls"]}]}"#),
+            None
+        );
+        assert_eq!(
+            swap(r#"{"tasks":[{"id":"t","image":"x","steps":["ls"]}]}"#),
+            None
+        );
+    }
+
+    #[test]
     fn task_overrides_defaults_and_merges_env() {
         let json = br#"{
-            "id": "demo", "max_parallel": 3,
+            "id": "demo",
             "defaults": {"image": "base", "env": {"A": "1", "B": "1"},
-                         "env_passthrough": ["API_KEY"], "memory_mb": 256,
+                         "env_passthrough": ["API_KEY"], "memory_mb": 256, "swap_mb": 1024,
                          "cpus": 0.5, "timeout_secs": 30, "workdir": "/w"},
             "tasks": [{
                 "id": "t", "image": "custom", "env": {"B": "2"}, "pids": 64,
@@ -269,6 +301,7 @@ mod tests {
         );
         assert_eq!(task.container.workdir.as_deref(), Some("/w"));
         assert_eq!(task.container.limits.memory_bytes, Some(256 * 1024 * 1024));
+        assert_eq!(task.container.limits.swap_bytes, Some(1024 * 1024 * 1024));
         assert_eq!(task.container.limits.nano_cpus, Some(500_000_000));
         assert_eq!(task.container.limits.pids, Some(64));
         assert_eq!(task.steps[0].timeout, Duration::from_secs(5));
@@ -281,7 +314,7 @@ mod tests {
         let any_env = |_: &str| Some("x".to_owned());
         for example in [
             &include_bytes!("../../../examples/hello.json")[..],
-            &include_bytes!("../../../examples/opencode.json")[..],
+            &include_bytes!("../../../examples/goose.json")[..],
         ] {
             parse_job(example, any_env).unwrap();
         }
@@ -317,12 +350,15 @@ mod tests {
             r#"{"tasks":[{"id":"bad id","image":"x","steps":["ls"]}]}"#,
             r#"{"tasks":[{"id":"t","image":"x","steps":[]}]}"#,
             r#"{"tasks":[{"id":"t","image":"x","cpus":-1,"steps":["ls"]}]}"#,
-            r#"{"max_parallel":0,"tasks":[{"id":"t","image":"x","steps":["ls"]}]}"#,
+            // Parallelism is host capacity, set on the orchestrator.
+            r#"{"max_parallel":2,"tasks":[{"id":"t","image":"x","steps":["ls"]}]}"#,
             // Isolation is not configurable from a job.
             r#"{"tasks":[{"id":"t","image":"x","network":"host","steps":["ls"]}]}"#,
             // 0 would mean "unlimited" to Docker.
             r#"{"tasks":[{"id":"t","image":"x","memory_mb":0,"steps":["ls"]}]}"#,
             r#"{"defaults":{"pids":0},"tasks":[{"id":"t","image":"x","steps":["ls"]}]}"#,
+            r#"{"tasks":[{"id":"t","image":"x","swap_mb":512,"steps":["ls"]}]}"#,
+            r#"{"tasks":[{"id":"t","image":"x","memory_mb":64,"swap_mb":4096,"steps":["ls"]}]}"#,
             r#"{"tasks":[{"id":"t","image":"x","env":{"A=B":"1"},"steps":["ls"]}]}"#,
             r#"{"tasks":[{"id":"t","image":"x","env":{"":"1"},"steps":["ls"]}]}"#,
         ] {

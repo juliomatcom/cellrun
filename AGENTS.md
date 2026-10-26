@@ -14,7 +14,7 @@ Target: a VM with ~1 GiB RAM. The orchestrator itself idles at a few MiB.
 ## Isolation model (the core requirement)
 
 Each task container is fully isolated **from the host and from every other
-task**, while the workload inside (e.g. opencode) has **full access** to its
+task**, while the workload inside (e.g. Goose) has **full access** to its
 own container: root, writable filesystem, public internet.
 
 | Layer | Mechanism | Where |
@@ -24,7 +24,8 @@ own container: root, writable filesystem, public internet.
 | DNS | explicit public resolvers (private ranges are dropped) | `--task-dns` |
 | Filesystem | no bind mounts, no volumes, no docker socket; anonymous volumes removed with the container | `docker.rs` |
 | Kernel (optional) | `--task-runtime runsc` (gVisor) | `TASK_RUNTIME` in `.env` |
-| Resources | memory (no swap), CPU, pids limits | job file + defaults |
+| Resources | memory (+ swap, default 1 GiB), CPU, pids limits | job file + defaults |
+| Parallelism | containers alive at once | `--max-parallel` / `ORCHESTRATOR_MAX_PARALLEL` (never the job) |
 
 Rules:
 - **Jobs cannot weaken isolation.** `ContainerSpec` has no network, mount,
@@ -67,7 +68,8 @@ a dependency on an outer crate or on forbidden tech (e.g. `serde` in
 ## Runtime model
 
 - `RunJob::execute` runs tasks with `buffer_unordered(max_parallel)` on a
-  **single-threaded** tokio runtime (I/O bound; smallest footprint). Never
+  **single-threaded** tokio runtime (I/O bound; smallest footprint). `max_parallel` is a
+  `RunJob` setting (host capacity, from the CLI), not a `Job` field. Never
   `spawn` per line/chunk; never collect unbounded output.
 - Per task: `start` (pull if needed, create with limits + labels, start
   `sleep infinity` under `--init`) → `exec` each step with `/bin/sh -c` →
@@ -86,7 +88,8 @@ a dependency on an outer crate or on forbidden tech (e.g. `serde` in
   `orchestrator cleanup <job>` reaps leftovers of every run of that job.
 - One network per running task: Docker's default address pools cap this at
   ~30 (see README to raise it).
-- Defaults applied by the Docker adapter: `memory_swap = memory` (no swap),
+- Defaults applied by the Docker adapter: `memory_swap = memory + swap` (swap defaults to
+  1 GiB per task in the job parser, max 2 GiB; 0 disables it),
   `pids_limit = 512`, private IPC, `init`.
 
 ## Contracts
@@ -109,7 +112,8 @@ Changing a wire format is a breaking change: update README and tests together.
 - `compose.yaml` (included by the repo root), all under profile
   `orchestrator` (run-to-completion): `sandbox-guard` (one-shot, host
   network, NET_ADMIN, installs firewall rules), `orchestrator` (depends on
-  the guard having completed) and build-only `opencode-runner`.
+  the guard having completed) and build-only `goose-runner` (the task image;
+  Goose replaced opencode for memory: ~144 vs ~469 MiB peak, see README).
 - The orchestrator container talks to the **host** daemon through the
   mounted socket, runs as uid 65532 with `group_add: ${DOCKER_GID}`,
   read-only rootfs, no caps, `mem_limit: 64m`. It joins the shared
@@ -131,7 +135,7 @@ cargo test                                                   # unit + architectu
 sudo sandbox-guard/guard.sh apply                            # host firewall (once per boot)
 cargo test -p infrastructure --test docker -- --ignored      # needs Docker + guard
 cargo build --release                                        # target/release/orchestrator
-docker build -t hostprobe/opencode-runner:latest runner      # task image
+docker build -t hostprobe/goose-runner:latest runner         # task image
 
 # via compose, from the repo root
 docker compose --profile orchestrator build

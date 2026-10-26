@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -156,18 +157,22 @@ fn task(id: &str, steps: Vec<Step>) -> Task {
     .unwrap()
 }
 
-fn job(max_parallel: usize, tasks: Vec<Task>) -> Job {
-    Job::new(JobId::new("job").unwrap(), max_parallel, tasks).unwrap()
+fn job(tasks: Vec<Task>) -> Job {
+    Job::new(JobId::new("job").unwrap(), tasks).unwrap()
+}
+
+fn parallel(n: usize) -> NonZeroUsize {
+    NonZeroUsize::new(n).unwrap()
 }
 
 #[tokio::test]
 async fn runs_steps_in_order_streams_lines_and_removes_container() {
     let runtime = FakeRuntime::with(&[("a", Script::ok(&["hel", "lo\nwor", "ld"]))]);
     let sink = RecordingSink::default();
-    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default());
+    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(1));
 
     let report = use_case
-        .execute(&job(1, vec![task("t", vec![step("a"), step("b")])]))
+        .execute(&job(vec![task("t", vec![step("a"), step("b")])]))
         .await;
 
     assert!(report.succeeded());
@@ -194,10 +199,10 @@ async fn failure_skips_remaining_steps_but_still_cleans_up() {
     };
     let runtime = FakeRuntime::with(&[("bad", failing)]);
     let sink = RecordingSink::default();
-    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default());
+    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(1));
 
     let report = use_case
-        .execute(&job(1, vec![task("t", vec![step("bad"), step("never")])]))
+        .execute(&job(vec![task("t", vec![step("bad"), step("never")])]))
         .await;
 
     let t = &report.tasks[0];
@@ -220,8 +225,8 @@ async fn continue_on_error_keeps_going_and_does_not_fail_task() {
     let mut tolerated = step("flaky");
     tolerated.continue_on_error = true;
 
-    let report = RunJob::new(&runtime, &sink, OutputLimits::default())
-        .execute(&job(1, vec![task("t", vec![tolerated, step("next")])]))
+    let report = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(1))
+        .execute(&job(vec![task("t", vec![tolerated, step("next")])]))
         .await;
 
     assert_eq!(report.tasks[0].status, TaskStatus::Succeeded);
@@ -239,8 +244,8 @@ async fn timeout_halts_task_even_with_continue_on_error() {
     let mut tolerated = step("slow");
     tolerated.continue_on_error = true;
 
-    let report = RunJob::new(&runtime, &sink, OutputLimits::default())
-        .execute(&job(1, vec![task("t", vec![tolerated, step("next")])]))
+    let report = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(1))
+        .execute(&job(vec![task("t", vec![tolerated, step("next")])]))
         .await;
 
     assert_eq!(report.tasks[0].status, TaskStatus::Failed);
@@ -260,16 +265,13 @@ async fn timeouts_and_runtime_errors_are_reported_per_step() {
     };
     let runtime = FakeRuntime::with(&[("slow", timeout), ("broken", broken)]);
     let sink = RecordingSink::default();
-    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default());
+    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(2));
 
     let report = use_case
-        .execute(&job(
-            2,
-            vec![
-                task("a", vec![step("slow")]),
-                task("b", vec![step("broken")]),
-            ],
-        ))
+        .execute(&job(vec![
+            task("a", vec![step("slow")]),
+            task("b", vec![step("broken")]),
+        ]))
         .await;
 
     assert_eq!(report.tasks[0].steps[0].outcome, StepOutcome::TimedOut);
@@ -289,8 +291,8 @@ async fn start_failure_marks_task_as_error_without_exec() {
     };
     let sink = RecordingSink::default();
 
-    let report = RunJob::new(&runtime, &sink, OutputLimits::default())
-        .execute(&job(1, vec![task("t", vec![step("a")])]))
+    let report = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(1))
+        .execute(&job(vec![task("t", vec![step("a")])]))
         .await;
 
     let t = &report.tasks[0];
@@ -311,8 +313,8 @@ async fn never_exceeds_max_parallel_containers() {
         .map(|i| task(&format!("t{i}"), vec![step("x")]))
         .collect();
 
-    let report = RunJob::new(&runtime, &sink, OutputLimits::default())
-        .execute(&job(2, tasks))
+    let report = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(2))
+        .execute(&job(tasks))
         .await;
 
     assert!(report.succeeded());
@@ -336,8 +338,8 @@ async fn finished_task_frees_its_slot_while_earlier_task_still_runs() {
         task("c", vec![step("fast")]),
     ];
 
-    RunJob::new(&runtime, &sink, OutputLimits::default())
-        .execute(&job(2, tasks))
+    RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(2))
+        .execute(&job(tasks))
         .await;
 
     let calls = runtime.calls();
@@ -357,8 +359,8 @@ async fn report_output_is_bounded_by_limits() {
         max_line_bytes: 64,
     };
 
-    let report = RunJob::new(&runtime, &sink, limits)
-        .execute(&job(1, vec![task("t", vec![step("loud")])]))
+    let report = RunJob::new(&runtime, &sink, limits, parallel(1))
+        .execute(&job(vec![task("t", vec![step("loud")])]))
         .await;
 
     let s = &report.tasks[0].steps[0];

@@ -3,6 +3,7 @@
 
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -79,6 +80,10 @@ enum Command {
         /// Bytes of stdout/stderr kept per step in the report.
         #[arg(long, default_value_t = 16 * 1024)]
         tail_bytes: usize,
+        /// Task containers alive at once. Host capacity, so it is set here
+        /// and never by the job: budget `max_parallel × memory_mb` of RAM.
+        #[arg(long, env = "ORCHESTRATOR_MAX_PARALLEL", default_value = "2")]
+        max_parallel: NonZeroUsize,
     },
     /// Validate a job file without running anything.
     Validate {
@@ -121,9 +126,10 @@ async fn main() -> ExitCode {
             report,
             pull,
             tail_bytes,
+            max_parallel,
         } => {
             let config = cli.task.docker_config(pull.into());
-            run(&job, &events, &report, config, tail_bytes).await
+            run(&job, &events, &report, config, tail_bytes, max_parallel).await
         }
         Command::Validate { job } => match load_job(&job) {
             Ok(job) => {
@@ -144,6 +150,7 @@ async fn run(
     report: &Path,
     config: DockerConfig,
     tail_bytes: usize,
+    max_parallel: NonZeroUsize,
 ) -> ExitCode {
     let job = match load_job(job) {
         Ok(job) => job,
@@ -166,7 +173,7 @@ async fn run(
         tail_bytes,
         ..OutputLimits::default()
     };
-    let use_case = RunJob::new(&runtime, &sink, limits);
+    let use_case = RunJob::new(&runtime, &sink, limits, max_parallel);
 
     let result = tokio::select! {
         report = use_case.execute(&job) => report,

@@ -37,7 +37,9 @@ services:
     environment:
       # Names only: values come from the shell or .env and are forwarded to
       # task containers via `env_passthrough` in the job file.
-      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+      # Task containers alive at once (host capacity, not a job setting).
+      - ORCHESTRATOR_MAX_PARALLEL=${MAX_PARALLEL:-2}
       - ORCHESTRATOR_TASK_RUNTIME=${TASK_RUNTIME:-}
       - ORCHESTRATOR_TASK_DNS=${TASK_DNS:-1.1.1.1,8.8.8.8}
 
@@ -54,10 +56,10 @@ services:
     mem_limit: 32m
     restart: "no"
 
-  # Build-only service for the image task containers start from.
-  opencode-runner:
+  # Build-only service for the image task containers start from (Goose).
+  goose-runner:
     build: ./runner
-    image: hostprobe/opencode-runner:latest
+    image: hostprobe/goose-runner:latest
     profiles: ["orchestrator"]
     entrypoint: ["true"]
 

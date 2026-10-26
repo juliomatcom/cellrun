@@ -1,11 +1,10 @@
 {
-  "id": "opencode-demo",
-  "max_parallel": 2,
+  "id": "goose-demo",
   "defaults": {
-    "image": "hostprobe/opencode-runner:latest",
-    "env_passthrough": ["ANTHROPIC_API_KEY"],
+    "image": "hostprobe/goose-runner:latest",
+    "env_passthrough": ["OPENAI_API_KEY"],
     "workdir": "/workspace",
-    "memory_mb": 384,
+    "memory_mb": 256,
     "cpus": 1.0,
     "timeout_secs": 900
   },
@@ -14,14 +13,14 @@
       "id": "fizzbuzz",
       "steps": [
         { "name": "scaffold", "run": "git init -q . && printf '# demo\\n' > README.md" },
-        { "name": "code", "run": "opencode run 'Create fizzbuzz.sh, a POSIX shell script that prints FizzBuzz from 1 to 20. Make it executable.'" },
+        { "name": "code", "run": "goose run --no-session --quiet --provider openai --model gpt-6-luna --with-builtin developer -t 'Create fizzbuzz.sh, a POSIX shell script that prints FizzBuzz from 1 to 20. Make it executable.'" },
         { "name": "verify", "run": "sh ./fizzbuzz.sh | head -n 15", "timeout_secs": 30 }
       ]
     },
     {
       "id": "smoke",
       "steps": [
-        "opencode --version",
+        "goose --version",
         { "run": "uname -a && id", "continue_on_error": true }
       ]
     }

@@ -7,7 +7,7 @@
 #                                 (bridge gateway, docker0, public/LAN IPs).
 #   DOCKER-USER  -i hp+ -> DROP   for private/link-local/CGNAT destinations:
 #                                 no LAN, no cloud metadata, no other containers.
-# Public internet (via Docker's NAT) stays open so tools like opencode work.
+# Public internet (via Docker's NAT) stays open so agents like Goose work.
 #
 # Usage: guard.sh [apply|remove]   (needs CAP_NET_ADMIN in the host netns)
 set -eu

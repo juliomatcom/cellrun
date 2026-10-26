@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use futures_util::stream::{self, StreamExt};
@@ -33,14 +34,17 @@ pub struct RunJob<R, S> {
     runtime: R,
     sink: S,
     limits: OutputLimits,
+    /// Task containers alive at once; sized to the host, not the job.
+    max_parallel: NonZeroUsize,
 }
 
 impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
-    pub fn new(runtime: R, sink: S, limits: OutputLimits) -> Self {
+    pub fn new(runtime: R, sink: S, limits: OutputLimits, max_parallel: NonZeroUsize) -> Self {
         Self {
             runtime,
             sink,
             limits,
+            max_parallel,
         }
     }
 
@@ -48,7 +52,7 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
         &self.runtime
     }
 
-    /// Runs the job with at most `job.max_parallel` containers alive at once.
+    /// Runs the job with at most `max_parallel` containers alive at once.
     /// Infrastructure failures are captured in the report, never returned.
     pub async fn execute(&self, job: &Job) -> JobReport {
         let started = Instant::now();
@@ -61,7 +65,7 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
         // earlier task is still running; the report is re-sorted afterwards.
         let mut indexed = stream::iter(job.tasks.iter().enumerate())
             .map(|(i, task)| async move { (i, self.run_task(&job.id, task).await) })
-            .buffer_unordered(job.max_parallel)
+            .buffer_unordered(self.max_parallel.get())
             .collect::<Vec<_>>()
             .await;
         indexed.sort_unstable_by_key(|(i, _)| *i);

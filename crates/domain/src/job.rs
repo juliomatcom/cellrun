@@ -51,6 +51,8 @@ id_type!(TaskId);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResourceLimits {
     pub memory_bytes: Option<u64>,
+    /// Swap allowed on top of `memory_bytes`. `None` means no swap.
+    pub swap_bytes: Option<u64>,
     /// CPU quota in billionths of a CPU (Docker's `NanoCpus`).
     pub nano_cpus: Option<u64>,
     pub pids: Option<u64>,
@@ -142,21 +144,18 @@ impl Task {
     }
 }
 
-/// A batch of independent tasks, run with bounded parallelism.
+/// A batch of independent tasks. How many run at once is host capacity, set
+/// by the runner (`RunJob`), not by the job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
     pub id: JobId,
-    pub max_parallel: usize,
     pub tasks: Vec<Task>,
 }
 
 impl Job {
-    pub fn new(id: JobId, max_parallel: usize, tasks: Vec<Task>) -> Result<Self, ValidationError> {
+    pub fn new(id: JobId, tasks: Vec<Task>) -> Result<Self, ValidationError> {
         if tasks.is_empty() {
             return Err(ValidationError::NoTasks);
-        }
-        if max_parallel == 0 {
-            return Err(ValidationError::ZeroValue("max_parallel"));
         }
         let mut seen = HashSet::with_capacity(tasks.len());
         for task in &tasks {
@@ -164,11 +163,7 @@ impl Job {
                 return Err(ValidationError::DuplicateTaskId(task.id.to_string()));
             }
         }
-        Ok(Self {
-            id,
-            max_parallel,
-            tasks,
-        })
+        Ok(Self { id, tasks })
     }
 }
 
@@ -232,17 +227,13 @@ mod tests {
     }
 
     #[test]
-    fn job_rejects_duplicates_empty_and_zero_parallelism() {
+    fn job_rejects_duplicates_and_empty() {
         let id = || JobId::new("j").unwrap();
-        assert_eq!(Job::new(id(), 1, vec![]), Err(ValidationError::NoTasks));
+        assert_eq!(Job::new(id(), vec![]), Err(ValidationError::NoTasks));
         assert_eq!(
-            Job::new(id(), 0, vec![task("a")]),
-            Err(ValidationError::ZeroValue("max_parallel"))
-        );
-        assert_eq!(
-            Job::new(id(), 1, vec![task("a"), task("a")]),
+            Job::new(id(), vec![task("a"), task("a")]),
             Err(ValidationError::DuplicateTaskId("a".into()))
         );
-        assert!(Job::new(id(), 2, vec![task("a"), task("b")]).is_ok());
+        assert!(Job::new(id(), vec![task("a"), task("b")]).is_ok());
     }
 }
