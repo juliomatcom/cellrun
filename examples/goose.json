@@ -13,7 +13,7 @@
       "id": "fizzbuzz",
       "steps": [
         { "name": "scaffold", "run": "git init -q . && printf '# demo\\n' > README.md" },
-        { "name": "code", "run": "goose run --no-session --quiet --provider openai --model gpt-6-luna --with-builtin developer -t 'Create fizzbuzz.sh, a POSIX shell script that prints FizzBuzz from 1 to 20. Make it executable.'" },
+        { "name": "code", "run": "goose run --no-session --quiet --output-format json --provider openai --model gpt-6-luna --with-builtin developer -t 'Create fizzbuzz.sh, a POSIX shell script that prints FizzBuzz from 1 to 20. Make it executable.' > /tmp/goose.json; rc=$?; jq -c '{tokens: .metadata}' /tmp/goose.json; exit $rc" },
         { "name": "verify", "run": "sh ./fizzbuzz.sh | head -n 15", "timeout_secs": 30 }
       ]
     },
