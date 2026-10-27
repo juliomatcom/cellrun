@@ -1,4 +1,4 @@
-//! `orchestrator` binary: the composition root. The only place where concrete
+//! `dispatcher` binary: the composition root. The only place where concrete
 //! adapters are chosen and plugged into use cases.
 
 use std::fs::File;
@@ -23,7 +23,7 @@ const EXIT_INTERRUPTED: u8 = 130;
 /// Dispatches ephemeral Docker containers that run shell steps and reports
 /// their output.
 #[derive(Parser)]
-#[command(name = "orchestrator", version)]
+#[command(name = "dispatcher", version)]
 struct Cli {
     #[command(flatten)]
     task: TaskArgs,
@@ -36,14 +36,14 @@ struct Cli {
 struct TaskArgs {
     /// OCI runtime for task containers, e.g. `runsc` (gVisor) for a
     /// separate kernel between the workload and the host.
-    #[arg(long, global = true, env = "ORCHESTRATOR_TASK_RUNTIME")]
+    #[arg(long, global = true, env = "DISPATCHER_TASK_RUNTIME")]
     task_runtime: Option<String>,
     /// DNS servers for task containers (must be public: private ranges are
-    /// firewalled off by sandbox-guard).
+    /// firewalled off by the host firewall, see README).
     #[arg(
         long,
         global = true,
-        env = "ORCHESTRATOR_TASK_DNS",
+        env = "DISPATCHER_TASK_DNS",
         value_delimiter = ',',
         default_value = "1.1.1.1,8.8.8.8"
     )]
@@ -53,16 +53,16 @@ struct TaskArgs {
     #[arg(
         long,
         global = true,
-        env = "ORCHESTRATOR_LABEL_PREFIX",
+        env = "DISPATCHER_LABEL_PREFIX",
         default_value = "swarm"
     )]
     label_prefix: String,
     /// Prefix of task bridge interfaces (1-2 chars of [a-z0-9]). The host
-    /// firewall (sandbox-guard) must be applied for the same prefix.
+    /// firewall (the caller's job, see README) must match the same prefix.
     #[arg(
         long,
         global = true,
-        env = "ORCHESTRATOR_BRIDGE_PREFIX",
+        env = "DISPATCHER_BRIDGE_PREFIX",
         default_value = "sw"
     )]
     bridge_prefix: String,
@@ -102,7 +102,7 @@ enum Command {
         tail_bytes: usize,
         /// Task containers alive at once. Host capacity, so it is set here
         /// and never by the job: budget `max_parallel × memory_mb` of RAM.
-        #[arg(long, env = "ORCHESTRATOR_MAX_PARALLEL", default_value = "2")]
+        #[arg(long, env = "DISPATCHER_MAX_PARALLEL", default_value = "2")]
         max_parallel: NonZeroUsize,
     },
     /// Validate a job file without running anything.
@@ -206,7 +206,7 @@ async fn run(
             for delay in [0, 500] {
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 if let Err(e) = runtime.remove_owned().await {
-                    eprintln!("cleanup failed: {e}; run `orchestrator cleanup {}`", job.id);
+                    eprintln!("cleanup failed: {e}; run `dispatcher cleanup {}`", job.id);
                 }
             }
             return ExitCode::from(EXIT_INTERRUPTED);

@@ -1,6 +1,6 @@
 //! Domain layer (innermost circle).
 //!
-//! Holds the core model of the orchestrator: what a job is, how its tasks and
+//! Holds the core model of the dispatcher: what a job is, how its tasks and
 //! steps are shaped, and what a result looks like. It has no knowledge of
 //! Docker, JSON, async runtimes or the filesystem.
 

@@ -1,4 +1,4 @@
-//! Bounded output handling. Containers may print gigabytes; the orchestrator
+//! Bounded output handling. Containers may print gigabytes; the dispatcher
 //! runs in ~1 GiB of RAM, so every buffer here has a hard cap.
 
 /// Keeps only the last `capacity` bytes written to it.

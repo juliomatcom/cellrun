@@ -4,13 +4,12 @@
 //! # Isolation
 //!
 //! Each task container is the only member of its own bridge network, whose
-//! host interface is named `<bridge_prefix><hex>` (`sw<hex>` by default). The
-//! host firewall installed by `sandbox-guard` drops everything from
-//! `<bridge_prefix>+` to the host itself and to
-//! private ranges, so a container reaches the public internet and nothing
-//! else: not the host, not the LAN, not other tasks. Containers get no
-//! mounts; inside, the workload has full (root) access. For a kernel
-//! boundary as well, set `runtime` to `runsc` (gVisor).
+//! host interface is named `<bridge_prefix><hex>` (`sw<hex>` by default), so
+//! tasks cannot see each other or other Docker networks. Containers get no
+//! mounts; inside, the workload has full (root) access. Keeping tasks off the
+//! host, the LAN and cloud metadata takes a host firewall on
+//! `<bridge_prefix>+`, which the caller applies (README, "Host firewall").
+//! For a kernel boundary as well, set `runtime` to `runsc` (gVisor).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -35,14 +34,14 @@ use crate::domain::{ContainerSpec, JobId, MemoryUsage, StreamKind, TaskId};
 const IFNAME_MAX: usize = 15;
 const UNIQUE_HEX_LEN: usize = 13;
 
-/// Label keys that mark everything the orchestrator creates, derived from
+/// Label keys that mark everything the dispatcher creates, derived from
 /// [`DockerConfig::label_prefix`].
 struct LabelKeys {
-    /// Marks every container and network created by the orchestrator.
+    /// Marks every container and network created by the dispatcher.
     managed: String,
     job: String,
     task: String,
-    /// Unique per orchestrator process: signal cleanup must only touch what
+    /// Unique per dispatcher process: signal cleanup must only touch what
     /// this process created, never a concurrent run of the same job.
     run: String,
 }
@@ -50,7 +49,7 @@ struct LabelKeys {
 impl LabelKeys {
     fn new(prefix: &str) -> Self {
         Self {
-            managed: format!("{prefix}.orchestrator"),
+            managed: format!("{prefix}.dispatcher"),
             job: format!("{prefix}.job"),
             task: format!("{prefix}.task"),
             run: format!("{prefix}.run"),
@@ -82,10 +81,10 @@ pub struct DockerConfig {
     /// OCI runtime for task containers, e.g. `runsc` (gVisor).
     pub runtime: Option<String>,
     /// Prefix of the labels put on containers and networks
-    /// (`<prefix>.orchestrator`, `.job`, `.task`, `.run`).
+    /// (`<prefix>.dispatcher`, `.job`, `.task`, `.run`).
     pub label_prefix: String,
     /// Prefix of every task bridge interface (1-2 chars of `[a-z0-9]`, so the
-    /// name fits Linux's 15-byte limit). `sandbox-guard` must firewall
+    /// name fits Linux's 15-byte limit). The host firewall must match
     /// `<prefix>+`; it is also the prefix of container/network names.
     pub bridge_prefix: String,
 }
@@ -184,8 +183,8 @@ impl DockerRuntime {
             .map(drop)
             .map_err(|e| {
                 let hint = if e.to_string().contains("address pools") {
-                    " (Docker's address pools are exhausted: lower ORCHESTRATOR_MAX_PARALLEL, run \
-                     `orchestrator cleanup <job>` for leftovers, or configure smaller \
+                    " (Docker's address pools are exhausted: lower DISPATCHER_MAX_PARALLEL, run \
+                     `dispatcher cleanup <job>` for leftovers, or configure smaller \
                      `default-address-pools` in daemon.json, see README)"
                 } else {
                     ""

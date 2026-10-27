@@ -1,4 +1,4 @@
-//! JSON job definition (the orchestrator's temporary input format).
+//! JSON job definition (the dispatcher's temporary input format).
 //!
 //! ```json
 //! {
@@ -61,7 +61,7 @@ struct ContainerDto {
     image: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
-    /// Names of variables copied from the orchestrator's own environment.
+    /// Names of variables copied from the dispatcher's own environment.
     /// Keeps secrets (API keys) out of the job file.
     #[serde(default)]
     env_passthrough: Vec<String>,
@@ -348,7 +348,7 @@ mod tests {
             r#"{"tasks":[{"id":"bad id","image":"x","steps":["ls"]}]}"#,
             r#"{"tasks":[{"id":"t","image":"x","steps":[]}]}"#,
             r#"{"tasks":[{"id":"t","image":"x","cpus":-1,"steps":["ls"]}]}"#,
-            // Parallelism is host capacity, set on the orchestrator.
+            // Parallelism is host capacity, set on the dispatcher.
             r#"{"max_parallel":2,"tasks":[{"id":"t","image":"x","steps":["ls"]}]}"#,
             // Isolation is not configurable from a job.
             r#"{"tasks":[{"id":"t","image":"x","network":"host","steps":["ls"]}]}"#,
