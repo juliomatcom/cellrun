@@ -9,9 +9,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use application::{ContainerRuntime, EventSink, OutputLimits, RunJob};
-use domain::{Event, Job, JobId};
-use infrastructure::{
+use swarm::application::{ContainerRuntime, EventSink, OutputLimits, RunJob};
+use swarm::domain::{Event, Job, JobId};
+use swarm::infrastructure::{
     DockerConfig, DockerRuntime, NdjsonSink, PullPolicy, parse_job, write_report,
 };
 
@@ -48,6 +48,24 @@ struct TaskArgs {
         default_value = "1.1.1.1,8.8.8.8"
     )]
     task_dns: Vec<String>,
+    /// Prefix of the labels on containers and networks (`<prefix>.job`, ...).
+    /// Keep it stable: `cleanup` only finds resources labelled with it.
+    #[arg(
+        long,
+        global = true,
+        env = "ORCHESTRATOR_LABEL_PREFIX",
+        default_value = "swarm"
+    )]
+    label_prefix: String,
+    /// Prefix of task bridge interfaces (1-2 chars of [a-z0-9]). The host
+    /// firewall (sandbox-guard) must be applied for the same prefix.
+    #[arg(
+        long,
+        global = true,
+        env = "ORCHESTRATOR_BRIDGE_PREFIX",
+        default_value = "sw"
+    )]
+    bridge_prefix: String,
 }
 
 impl TaskArgs {
@@ -56,6 +74,8 @@ impl TaskArgs {
             pull,
             dns: self.task_dns.clone(),
             runtime: self.task_runtime.clone().filter(|r| !r.is_empty()),
+            label_prefix: self.label_prefix.clone(),
+            bridge_prefix: self.bridge_prefix.clone(),
             ..DockerConfig::default()
         }
     }

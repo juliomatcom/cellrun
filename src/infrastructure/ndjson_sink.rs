@@ -7,10 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use application::EventSink;
-use domain::{Event, StreamKind};
+use crate::application::EventSink;
+use crate::domain::{Event, StreamKind};
 
-use crate::report_json::{MemoryDto, OutcomeDto, task_status};
+use crate::infrastructure::report_json::{MemoryDto, OutcomeDto, task_status};
 
 pub struct NdjsonSink<W: Write> {
     out: Mutex<LineWriter<W>>,
@@ -187,7 +187,7 @@ impl<W: Write + Send> EventSink for NdjsonSink<W> {
 mod tests {
     use std::time::Duration;
 
-    use domain::{StepOutcome, TaskId};
+    use crate::domain::{StepOutcome, TaskId};
 
     use super::*;
 

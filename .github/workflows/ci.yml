@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked
+      - run: cargo test --locked
+      - run: docker pull debian:bookworm-slim
+      # Host firewall via the guard image (same flags as compose), so the
+      # runner only needs docker group access, not sudo.
+      - run: docker build -t swarm/sandbox-guard:latest sandbox-guard
+      - run: >-
+          docker run --rm --network host --cap-drop ALL
+          --cap-add NET_ADMIN --cap-add NET_RAW --read-only
+          swarm/sandbox-guard:latest apply
+      - run: cargo test --locked --test docker -- --ignored
+
+  compose:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - run: sed "s/^DOCKER_GID=.*/DOCKER_GID=$(stat -c %g /var/run/docker.sock)/" .env.example > .env
+      - run: docker compose --profile orchestrator config --quiet
+      - run: docker compose --profile orchestrator build orchestrator sandbox-guard
+      - run: docker pull debian:bookworm-slim
+      - name: Smoke test (hello.json has one intentionally failing task => exit 1)
+        run: |
+          set +e
+          docker compose --progress quiet run --rm -T orchestrator run /examples/hello.json > report.json
+          code=$?
+          set -e
+          test "$code" = 1
+          jq -e '.tasks[0].status == "succeeded" and .tasks[1].status == "failed"' report.json

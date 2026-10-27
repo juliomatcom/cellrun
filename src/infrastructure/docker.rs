@@ -4,8 +4,9 @@
 //! # Isolation
 //!
 //! Each task container is the only member of its own bridge network, whose
-//! host interface is named `hp<hex>`. The host firewall installed by
-//! `sandbox-guard` drops everything from `hp+` to the host itself and to
+//! host interface is named `<bridge_prefix><hex>` (`sw<hex>` by default). The
+//! host firewall installed by `sandbox-guard` drops everything from
+//! `<bridge_prefix>+` to the host itself and to
 //! private ranges, so a container reaches the public internet and nothing
 //! else: not the host, not the LAN, not other tasks. Containers get no
 //! mounts; inside, the workload has full (root) access. For a kernel
@@ -27,19 +28,35 @@ use bollard::query_parameters::{
 };
 use futures_util::{StreamExt, TryStreamExt};
 
-use application::{ContainerRuntime, ExecStatus, OutputObserver, RuntimeError};
-use domain::{ContainerSpec, JobId, MemoryUsage, StreamKind, TaskId};
+use crate::application::{ContainerRuntime, ExecStatus, OutputObserver, RuntimeError};
+use crate::domain::{ContainerSpec, JobId, MemoryUsage, StreamKind, TaskId};
 
-/// Prefix of every task bridge interface; `sandbox-guard` firewalls `hp+`.
-pub const BRIDGE_PREFIX: &str = "hp";
+/// Linux `IFNAMSIZ` - 1: a bridge interface name is `<prefix><13 hex>`.
+const IFNAME_MAX: usize = 15;
+const UNIQUE_HEX_LEN: usize = 13;
 
-/// Label marking every container and network created by the orchestrator.
-pub const LABEL_MANAGED: &str = "hostprobe.orchestrator";
-pub const LABEL_JOB: &str = "hostprobe.job";
-pub const LABEL_TASK: &str = "hostprobe.task";
-/// Unique per orchestrator process: signal cleanup must only touch what this
-/// process created, never a concurrent run of the same job.
-pub const LABEL_RUN: &str = "hostprobe.run";
+/// Label keys that mark everything the orchestrator creates, derived from
+/// [`DockerConfig::label_prefix`].
+struct LabelKeys {
+    /// Marks every container and network created by the orchestrator.
+    managed: String,
+    job: String,
+    task: String,
+    /// Unique per orchestrator process: signal cleanup must only touch what
+    /// this process created, never a concurrent run of the same job.
+    run: String,
+}
+
+impl LabelKeys {
+    fn new(prefix: &str) -> Self {
+        Self {
+            managed: format!("{prefix}.orchestrator"),
+            job: format!("{prefix}.job"),
+            task: format!("{prefix}.task"),
+            run: format!("{prefix}.run"),
+        }
+    }
+}
 
 /// Keeps the container alive between `exec` calls; falls back to a loop on
 /// images whose `sleep` lacks `infinity` (e.g. old busybox).
@@ -64,6 +81,13 @@ pub struct DockerConfig {
     pub dns: Vec<String>,
     /// OCI runtime for task containers, e.g. `runsc` (gVisor).
     pub runtime: Option<String>,
+    /// Prefix of the labels put on containers and networks
+    /// (`<prefix>.orchestrator`, `.job`, `.task`, `.run`).
+    pub label_prefix: String,
+    /// Prefix of every task bridge interface (1-2 chars of `[a-z0-9]`, so the
+    /// name fits Linux's 15-byte limit). `sandbox-guard` must firewall
+    /// `<prefix>+`; it is also the prefix of container/network names.
+    pub bridge_prefix: String,
 }
 
 impl Default for DockerConfig {
@@ -73,6 +97,8 @@ impl Default for DockerConfig {
             default_pids_limit: Some(512),
             dns: vec!["1.1.1.1".to_owned(), "8.8.8.8".to_owned()],
             runtime: None,
+            label_prefix: "swarm".to_owned(),
+            bridge_prefix: "sw".to_owned(),
         }
     }
 }
@@ -83,14 +109,17 @@ pub struct DockerRuntime {
     /// container id -> its private network.
     networks: Mutex<HashMap<String, String>>,
     run_id: String,
+    labels: LabelKeys,
 }
 
 impl DockerRuntime {
     /// Connects to `$DOCKER_HOST` (unix://) or `/var/run/docker.sock`.
     pub fn connect(config: DockerConfig) -> Result<Self, RuntimeError> {
+        validate_prefixes(&config)?;
         let docker = Docker::connect_with_local_defaults().map_err(err)?;
         Ok(Self {
             docker,
+            labels: LabelKeys::new(&config.label_prefix),
             config,
             networks: Mutex::new(HashMap::new()),
             run_id: unique_hex(),
@@ -255,12 +284,12 @@ impl ContainerRuntime for DockerRuntime {
         self.ensure_image(&spec.image).await?;
 
         let labels = HashMap::from([
-            (LABEL_MANAGED.to_owned(), "1".to_owned()),
-            (LABEL_JOB.to_owned(), job.to_string()),
-            (LABEL_TASK.to_owned(), task.to_string()),
-            (LABEL_RUN.to_owned(), self.run_id.clone()),
+            (self.labels.managed.clone(), "1".to_owned()),
+            (self.labels.job.clone(), job.to_string()),
+            (self.labels.task.clone(), task.to_string()),
+            (self.labels.run.clone(), self.run_id.clone()),
         ]);
-        let (name, bridge) = unique_names(job, task);
+        let (name, bridge) = unique_names(&self.config.bridge_prefix, job, task);
         self.create_network(&name, &bridge, &labels).await?;
         match self.create_container(&name, labels, spec).await {
             Ok(id) => {
@@ -360,11 +389,12 @@ impl ContainerRuntime for DockerRuntime {
     }
 
     async fn remove_job(&self, job: &JobId) -> Result<usize, RuntimeError> {
-        self.remove_labelled(format!("{LABEL_JOB}={job}")).await
+        self.remove_labelled(format!("{}={job}", self.labels.job))
+            .await
     }
 
     async fn remove_owned(&self) -> Result<usize, RuntimeError> {
-        self.remove_labelled(format!("{LABEL_RUN}={}", self.run_id))
+        self.remove_labelled(format!("{}={}", self.labels.run, self.run_id))
             .await
     }
 }
@@ -372,7 +402,7 @@ impl ContainerRuntime for DockerRuntime {
 impl DockerRuntime {
     /// Removes managed containers, then networks, matching `label`.
     async fn remove_labelled(&self, label: String) -> Result<usize, RuntimeError> {
-        let filters = HashMap::from([("label", vec![format!("{LABEL_MANAGED}=1"), label])]);
+        let filters = HashMap::from([("label", vec![format!("{}=1", self.labels.managed), label])]);
         let options = ListContainersOptionsBuilder::default()
             .all(true)
             .filters(&filters)
@@ -482,15 +512,33 @@ fn normalize_image_ref(image: &str) -> String {
     }
 }
 
-/// Unique names for a task's container + network (`hp-<job>-<task>-<id>`,
-/// readable in `docker ps`) and its bridge interface (`hp<id>`, which must
-/// fit Linux's 15-byte interface name limit).
-fn unique_names(job: &JobId, task: &TaskId) -> (String, String) {
+/// Unique names for a task's container + network (`<prefix>-<job>-<task>-<id>`,
+/// readable in `docker ps`) and its bridge interface (`<prefix><id>`, which
+/// must fit Linux's 15-byte interface name limit).
+fn unique_names(prefix: &str, job: &JobId, task: &TaskId) -> (String, String) {
     let id = unique_hex();
     (
-        format!("hp-{job}-{task}-{id}"),
-        format!("{BRIDGE_PREFIX}{id}"),
+        format!("{prefix}-{job}-{task}-{id}"),
+        format!("{prefix}{id}"),
     )
+}
+
+fn validate_prefixes(config: &DockerConfig) -> Result<(), RuntimeError> {
+    let bridge = &config.bridge_prefix;
+    let ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    if bridge.is_empty() || bridge.len() + UNIQUE_HEX_LEN > IFNAME_MAX || !bridge.chars().all(ok) {
+        return Err(RuntimeError::new(format!(
+            "bridge prefix `{bridge}` must be 1-{} chars of [a-z0-9]",
+            IFNAME_MAX - UNIQUE_HEX_LEN
+        )));
+    }
+    let label = &config.label_prefix;
+    if label.is_empty() || !label.chars().all(|c| ok(c) || matches!(c, '-' | '.' | '_')) {
+        return Err(RuntimeError::new(format!(
+            "label prefix `{label}` must be non-empty and use only [a-z0-9._-]"
+        )));
+    }
+    Ok(())
 }
 
 /// 13 hex chars (52 bits) mixing time, pid and a process-wide counter.
@@ -542,13 +590,31 @@ mod tests {
     fn names_are_unique_and_bridge_fits_ifname_limit() {
         let job = JobId::new("j").unwrap();
         let task = TaskId::new("t").unwrap();
-        let (a, bridge_a) = unique_names(&job, &task);
-        let (b, bridge_b) = unique_names(&job, &task);
+        let (a, bridge_a) = unique_names("hp", &job, &task);
+        let (b, bridge_b) = unique_names("hp", &job, &task);
         assert_ne!(a, b);
         assert_ne!(bridge_a, bridge_b);
         assert!(a.starts_with("hp-j-t-"));
         assert!(a.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'));
-        assert!(bridge_a.starts_with(BRIDGE_PREFIX));
+        assert!(bridge_a.starts_with("hp"));
         assert_eq!(bridge_a.len(), 15, "Linux IFNAMSIZ - 1");
+    }
+
+    #[test]
+    fn prefixes_are_validated() {
+        let with = |label: &str, bridge: &str| DockerConfig {
+            label_prefix: label.to_owned(),
+            bridge_prefix: bridge.to_owned(),
+            ..DockerConfig::default()
+        };
+        assert!(validate_prefixes(&DockerConfig::default()).is_ok());
+        assert!(validate_prefixes(&with("acme.app", "hp")).is_ok());
+        assert!(validate_prefixes(&with("swarm", "")).is_err());
+        assert!(
+            validate_prefixes(&with("swarm", "abc")).is_err(),
+            "too long for IFNAMSIZ"
+        );
+        assert!(validate_prefixes(&with("swarm", "H")).is_err());
+        assert!(validate_prefixes(&with("", "sw")).is_err());
     }
 }

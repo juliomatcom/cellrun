@@ -1,7 +1,7 @@
 {
   "id": "goose-demo",
   "defaults": {
-    "image": "hostprobe/goose-runner:latest",
+    "image": "swarm/goose-runner:latest",
     "env_passthrough": ["OPENAI_API_KEY"],
     "workdir": "/workspace",
     "memory_mb": 256,

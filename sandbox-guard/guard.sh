@@ -1,11 +1,12 @@
 #!/bin/sh
 # Host firewall for task containers. Idempotent; safe to run on every start.
 #
-# The orchestrator names every task bridge `hp<hex>`, so one interface
-# wildcard (`hp+`) covers all of them:
-#   INPUT        -i hp+ -> DROP   task containers cannot reach ANY host address
+# The orchestrator names every task bridge `<prefix><hex>` (prefix `sw` by
+# default, `--bridge-prefix` there), so one interface wildcard (`<prefix>+`)
+# covers all of them. Set BRIDGE_PREFIX to match the orchestrator:
+#   INPUT        -i sw+ -> DROP   task containers cannot reach ANY host address
 #                                 (bridge gateway, docker0, public/LAN IPs).
-#   DOCKER-USER  -i hp+ -> DROP   for private/link-local/CGNAT destinations:
+#   DOCKER-USER  -i sw+ -> DROP   for private/link-local/CGNAT destinations:
 #                                 no LAN, no cloud metadata, no other containers.
 # Public internet (via Docker's NAT) stays open so agents like Goose work.
 #
@@ -13,7 +14,7 @@
 set -eu
 
 ACTION=${1:-apply}
-IFACE='hp+'
+IFACE="${BRIDGE_PREFIX:-sw}+"
 PRIVATE='10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10,0.0.0.0/8,224.0.0.0/4,240.0.0.0/4'
 
 # Use whichever backend Docker programs (it owns the DOCKER-USER chain).

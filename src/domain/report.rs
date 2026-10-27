@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::job::{JobId, TaskId};
+use crate::domain::job::{JobId, TaskId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {

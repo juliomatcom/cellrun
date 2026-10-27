@@ -3,7 +3,7 @@
 //! ```json
 //! {
 //!   "id": "demo",
-//!   "defaults": { "image": "hostprobe/goose-runner:latest",
+//!   "defaults": { "image": "swarm/goose-runner:latest",
 //!                 "env_passthrough": ["OPENAI_API_KEY"], "memory_mb": 256 },
 //!   "tasks": [
 //!     { "id": "hello", "steps": ["echo hi", { "run": "goose run -t 'fix bug'", "timeout_secs": 900 }] }
@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use domain::{ContainerSpec, Job, JobId, ResourceLimits, Step, Task, TaskId, ValidationError};
+use crate::domain::{
+    ContainerSpec, Job, JobId, ResourceLimits, Step, Task, TaskId, ValidationError,
+};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
 /// Swap granted on top of `memory_mb` when the job does not say otherwise.
@@ -313,8 +315,8 @@ mod tests {
     fn bundled_examples_are_valid() {
         let any_env = |_: &str| Some("x".to_owned());
         for example in [
-            &include_bytes!("../../../examples/hello.json")[..],
-            &include_bytes!("../../../examples/goose.json")[..],
+            &include_bytes!("../../examples/hello.json")[..],
+            &include_bytes!("../../examples/goose.json")[..],
         ] {
             parse_job(example, any_env).unwrap();
         }

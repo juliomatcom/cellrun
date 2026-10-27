@@ -6,9 +6,9 @@
 
 use std::time::Duration;
 
-use application::{ContainerRuntime, ExecStatus, OutputObserver};
-use domain::{ContainerSpec, JobId, StreamKind, TaskId};
-use infrastructure::{DockerConfig, DockerRuntime};
+use swarm::application::{ContainerRuntime, ExecStatus, OutputObserver};
+use swarm::domain::{ContainerSpec, JobId, StreamKind, TaskId};
+use swarm::infrastructure::{DockerConfig, DockerRuntime};
 
 #[derive(Default)]
 struct Collect {
@@ -96,7 +96,7 @@ async fn remove_job_reaps_labelled_containers() {
 
 // -------------------------------------------------------------- isolation --
 //
-// Requires the host firewall: `sudo apps/orchestrator/sandbox-guard/guard.sh apply`.
+// Requires the host firewall: `sudo sandbox-guard/guard.sh apply`.
 
 use std::net::UdpSocket;
 
@@ -108,7 +108,7 @@ const BACKEND_NET: &str = "it-isolation-backend";
 const BACKEND_SVC: &str = "it-isolation-backend-svc";
 
 /// Stands in for an event bus / database on the shared service network
-/// (`hostprobe-backend` in compose). Returns its IP.
+/// (`swarm-backend` in compose). Returns its IP.
 async fn start_backend_service(docker: &Docker) -> String {
     remove_backend_service(docker).await;
     docker

@@ -3,7 +3,7 @@
 # provider-agnostic coding agent (OpenAI, Anthropic, Gemini, OpenRouter, Groq,
 # Ollama and any OpenAI-compatible endpoint, so open-weight models too).
 #
-#   docker build -t hostprobe/goose-runner:latest apps/orchestrator/runner
+#   docker build -t swarm/goose-runner:latest runner
 #
 # Why Goose: same fizzbuzz task, gpt-6-luna, 2 GiB limit — Goose peaked at
 # ~144 MiB of process memory vs ~469 MiB for opencode (see README, "Memory").

@@ -1,33 +1,36 @@
-[workspace]
-resolver = "3"
-members = ["crates/domain", "crates/application", "crates/infrastructure", "crates/cli"]
-
-[workspace.package]
+[package]
+name = "swarm"
+description = "Small orchestrator for ephemeral, isolated Docker containers that run shell steps."
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 publish = false
+default-run = "orchestrator"
 
-[workspace.dependencies]
-# Internal crates (inner -> outer: domain <- application <- infrastructure <- cli)
-domain = { path = "crates/domain" }
-application = { path = "crates/application" }
-infrastructure = { path = "crates/infrastructure" }
+[lib]
+name = "swarm"
+path = "src/lib.rs"
 
-# External
+[[bin]]
+name = "orchestrator"
+path = "src/main.rs"
+
+# Layers live in src/{domain,application,infrastructure}; main.rs is the
+# composition root. tests/architecture.rs enforces the dependency rule.
+[dependencies]
 bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 clap = { version = "4", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "signal", "time"] }
 
-[workspace.lints.rust]
+[lints.rust]
 unsafe_code = "forbid"
 
-[workspace.lints.clippy]
+[lints.clippy]
 all = { level = "warn", priority = -1 }
 
 [profile.release]

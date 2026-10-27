@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use crate::job::{JobId, TaskId};
-use crate::report::{MemoryUsage, StepOutcome, TaskStatus};
+use crate::domain::job::{JobId, TaskId};
+use crate::domain::report::{MemoryUsage, StepOutcome, TaskStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamKind {

@@ -1,8 +1,7 @@
-# Included from the repo root compose.yaml; paths are relative to this file.
+# Run-to-completion orchestrator. Usable standalone or `include`d by a parent
+# project's compose file (paths are relative to this file).
 #
-# The orchestrator is a run-to-completion CLI, so it sits behind the
-# `orchestrator` profile and is started on demand:
-#
+#   cp .env.example .env
 #   docker compose --profile orchestrator build
 #   docker compose run --rm -T orchestrator run /examples/hello.json > report.json
 #
@@ -10,11 +9,14 @@
 # containers are *siblings* on the host, not nested inside this container.
 # Each one gets its own network; `sandbox-guard` firewalls those networks off
 # from the host, the LAN and each other before the orchestrator starts.
+#
+# Naming (images, network, labels, bridge prefix) is parameterised so an
+# embedding project can keep its own conventions; see README, "Embedding".
 
 services:
   orchestrator:
     build: .
-    image: hostprobe/orchestrator:latest
+    image: ${IMAGE_NAMESPACE:-swarm}/orchestrator:latest
     profiles: ["orchestrator"]
     init: true
     user: "65532:65532"
@@ -25,8 +27,9 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 64m
     # Shared with event bus / database services. Task containers can never
-    # reach it: they live on their own `hp*` bridges, which sandbox-guard
-    # firewalls off from all private ranges (and Docker isolates bridges).
+    # reach it: they live on their own bridges (`${BRIDGE_PREFIX}*`), which
+    # sandbox-guard firewalls off from all private ranges (and Docker
+    # isolates bridges).
     networks: [backend]
     depends_on:
       sandbox-guard:
@@ -42,12 +45,14 @@ services:
       - ORCHESTRATOR_MAX_PARALLEL=${MAX_PARALLEL:-2}
       - ORCHESTRATOR_TASK_RUNTIME=${TASK_RUNTIME:-}
       - ORCHESTRATOR_TASK_DNS=${TASK_DNS:-1.1.1.1,8.8.8.8}
+      - ORCHESTRATOR_LABEL_PREFIX=${LABEL_PREFIX:-swarm}
+      - ORCHESTRATOR_BRIDGE_PREFIX=${BRIDGE_PREFIX:-sw}
 
   # One-shot: installs the host firewall rules isolating task containers
   # (sandbox-guard/guard.sh). Idempotent; runs before every orchestrator run.
   sandbox-guard:
     build: ./sandbox-guard
-    image: hostprobe/sandbox-guard:latest
+    image: ${IMAGE_NAMESPACE:-swarm}/sandbox-guard:latest
     profiles: ["orchestrator"]
     network_mode: host
     cap_drop: [ALL]
@@ -55,16 +60,18 @@ services:
     read_only: true
     mem_limit: 32m
     restart: "no"
+    environment:
+      - BRIDGE_PREFIX=${BRIDGE_PREFIX:-sw}
 
   # Build-only service for the image task containers start from (Goose).
   goose-runner:
     build: ./runner
-    image: hostprobe/goose-runner:latest
+    image: ${IMAGE_NAMESPACE:-swarm}/goose-runner:latest
     profiles: ["orchestrator"]
     entrypoint: ["true"]
 
 networks:
-  # Repo-wide service network. Any app that needs it declares it with this
-  # exact definition; Compose merges identical declarations across includes.
+  # Service network. A parent project that wants to share it declares it with
+  # the same name; Compose merges identical declarations across includes.
   backend:
-    name: hostprobe-backend
+    name: ${BACKEND_NETWORK:-swarm-backend}

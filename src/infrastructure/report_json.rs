@@ -4,7 +4,7 @@ use std::io::Write;
 
 use serde::Serialize;
 
-use domain::{JobReport, MemoryUsage, StepOutcome, StepReport, TaskReport, TaskStatus};
+use crate::domain::{JobReport, MemoryUsage, StepOutcome, StepReport, TaskReport, TaskStatus};
 
 #[derive(Serialize)]
 struct JobDto<'a> {
@@ -139,7 +139,7 @@ pub fn write_report(report: &JobReport, mut out: impl Write) -> std::io::Result<
 mod tests {
     use std::time::Duration;
 
-    use domain::{JobId, TaskId};
+    use crate::domain::{JobId, TaskId};
 
     use super::*;
 

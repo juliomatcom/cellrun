@@ -1,6 +1,55 @@
-# AGENTS.md — apps/orchestrator
+# AGENTS.md — swarm
 
-Extends the repo-wide [AGENTS.md](../../AGENTS.md). Read that first.
+Guidance for humans and coding agents working in this repository. Swarm is a
+standalone, reusable crate: it knows nothing about the projects that embed it
+(see README, "Embedding"). Keep it that way: no project names, image
+namespaces or network names baked in; anything environment-specific is a flag,
+an env var or a compose variable with a neutral default.
+
+## Repository layout
+
+```
+.
+├── Cargo.toml / Cargo.lock  # one plain crate: lib `swarm` + bin `orchestrator`
+├── src/                     # all Rust code (layers below)
+├── tests/                   # integration + architecture tests
+├── compose.yaml             # services; usable standalone or `include`d
+├── .env.example             # compose variables
+├── Dockerfile               # production image (multi-stage, distroless)
+├── runner/                  # task image (Goose)
+├── sandbox-guard/           # host firewall one-shot
+├── examples/  jobs/         # sample jobs (baked in) / local jobs (git-ignored)
+└── .github/workflows/ci.yml
+```
+
+## Architecture: Clean Architecture
+
+Source dependencies point only inwards. Need something from the outside world
+in a use case? Define a **port** in `application` and implement it in
+`infrastructure`. Wire formats (JSON DTOs) live in `infrastructure` and are
+mapped to/from domain types at the boundary; domain types are never
+serialized directly.
+
+| Layer | May depend on | Must never contain |
+|---|---|---|
+| `domain` | std only | I/O, async runtimes, serialization, frameworks |
+| `application` | `domain` | concrete tech (Docker, HTTP, serde DTOs) |
+| `infrastructure` | `application`, `domain` | business rules, CLI/arg parsing |
+| `main.rs` | everything | business logic |
+
+## Engineering standards
+
+- **Resource budget:** targets a VM with ~1 GiB RAM shared by all services.
+  Bound every buffer, queue and concurrency level; stream instead of
+  collecting; set `mem_limit` per service.
+- **Tests:** domain and application are unit tested with fakes for ports;
+  adapters get integration tests (`#[ignore]`d when they need Docker).
+- **Secrets:** never in source, job files, logs or reports. Pass via env.
+- **Before pushing:** `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test`. Keep changes minimal; match surrounding style.
+- **No breaking changes** to the wire formats, flags, env vars, exit codes or
+  compose variables without updating README and tests together (embedders pin
+  this repo as a submodule).
 
 ## What it is
 
@@ -20,7 +69,7 @@ own container: root, writable filesystem, public internet.
 | Layer | Mechanism | Where |
 |---|---|---|
 | Network: other tasks | one bridge network per task (sole member), ICC off | `docker.rs` |
-| Network: host + LAN + metadata | bridges named `hp<hex>`; host firewall drops `-i hp+` to INPUT and to private ranges in DOCKER-USER | `sandbox-guard/guard.sh` |
+| Network: host + LAN + metadata | bridges named `<bridge-prefix><hex>` (default `sw`); host firewall drops `-i <prefix>+` to INPUT and to private ranges in DOCKER-USER | `sandbox-guard/guard.sh` |
 | DNS | explicit public resolvers (private ranges are dropped) | `--task-dns` |
 | Filesystem | no bind mounts, no volumes, no docker socket; anonymous volumes removed with the container | `docker.rs` |
 | Kernel (optional) | `--task-runtime runsc` (gVisor) | `TASK_RUNTIME` in `.env` |
@@ -38,32 +87,33 @@ Rules:
   this). Without it, tasks can reach the host. The isolation integration
   test fails if the rules are missing.
 
-## Crates (one per circle — the dependency rule is enforced by Cargo)
+## Source layout (one module per circle — the dependency rule is enforced by a test)
 
 ```
-crates/
+src/
 ├── domain/          1. entities & rules. No deps at all.
 ├── application/     2. RunJob use case + ports (ContainerRuntime, EventSink).
 │                       deps: domain, futures-util
 ├── infrastructure/  3. adapters: DockerRuntime (bollard, unix socket),
 │                       job_input (JSON -> domain), NdjsonSink, report_json.
 │                       deps: application, domain, bollard, serde, tokio
-└── cli/             4. composition root: `orchestrator` binary (clap, tokio).
+├── lib.rs           exposes the three layers as the `swarm` library
+└── main.rs          4. composition root: `orchestrator` binary (clap, tokio).
 ```
 
-`crates/cli/tests/architecture.rs` fails the build if an inner crate declares
-a dependency on an outer crate or on forbidden tech (e.g. `serde` in
-`application`). Update its `RULES` table if you add a crate.
+`tests/architecture.rs` scans each layer's non-test `use` declarations and
+fails if an inner layer names an outer layer or forbidden tech (e.g. `serde`
+in `application`). Update its `RULES` table if you add a layer.
 
 ### Where does my change go?
 
-| Change | Crate |
+| Change | Layer |
 |---|---|
 | New invariant, new outcome/status, output buffering rules | `domain` |
 | Execution flow (ordering, halting, parallelism, events emitted) | `application` |
 | A new port (e.g. "upload artifacts") | trait in `application::ports`, impl in `infrastructure` |
 | Docker API details, JSON field names, event/report wire format | `infrastructure` |
-| CLI flags, exit codes, signal handling, choosing adapters | `cli` |
+| CLI flags, exit codes, signal handling, choosing adapters | `main.rs` |
 
 ## Runtime model
 
@@ -81,10 +131,12 @@ a dependency on an outer crate or on forbidden tech (e.g. `serde` in
   container is removed instead, which kills it.
 - Output: every chunk → `LineSplitter` (max line 8 KiB) → `output` event;
   report keeps only a `TailBuffer` (default 16 KiB) per stream per step.
-- Per task: create network `hp-<job>-<task>-<id>` (bridge iface `hp<id>`) →
+- Per task: create network `<bridge-prefix>-<job>-<task>-<id>` (bridge iface `<bridge-prefix><id>`) →
   create/start container on it → steps → remove container → remove network.
-- Containers and networks carry labels `hostprobe.orchestrator=1`,
-  `hostprobe.job=<id>`, `hostprobe.task=<id>`, `hostprobe.run=<per-process id>`.
+- Containers and networks carry labels `<label-prefix>.orchestrator=1`,
+  `<label-prefix>.job=<id>`, `.task=<id>`, `.run=<per-process id>` (prefix `swarm`
+  by default, `--label-prefix`). Keep it stable between runs: `cleanup` only
+  finds resources carrying the prefix in use.
   On SIGINT/SIGTERM only this run's resources are removed (`remove_owned`);
   `orchestrator cleanup <job>` reaps leftovers of every run of that job.
 - One network per running task: Docker's default address pools cap this at
@@ -95,11 +147,11 @@ a dependency on an outer crate or on forbidden tech (e.g. `serde` in
 
 ## Contracts
 
-- **Input:** JSON job, see `README.md` and `crates/infrastructure/src/job_input.rs`
+- **Input:** JSON job, see `README.md` and `src/infrastructure/job_input.rs`
   (`deny_unknown_fields`). Secrets only via `env_passthrough` (names of
   orchestrator env vars), never literal values in files.
 - **Events:** NDJSON, one object per line, `event` discriminator, `ts_ms`.
-- **Report:** JSON, see `crates/infrastructure/src/report_json.rs`.
+- **Report:** JSON, see `src/infrastructure/report_json.rs`.
 - **Exit codes:** 0 all ok · 1 a task failed/errored · 2 bad input ·
   3 Docker/IO error · 130 interrupted.
 
@@ -110,7 +162,7 @@ Changing a wire format is a breaking change: update README and tests together.
 - `Dockerfile`: multi-stage, `rust:1-slim-bookworm` build → 
   `gcr.io/distroless/cc-debian12:nonroot` runtime (~40 MB, no shell).
   Examples are baked in at `/examples`.
-- `compose.yaml` (included by the repo root), all under profile
+- `compose.yaml` (standalone, or `include`d by a parent project), all under profile
   `orchestrator` (run-to-completion): `sandbox-guard` (one-shot, host
   network, NET_ADMIN, installs firewall rules), `orchestrator` (depends on
   the guard having completed) and build-only `goose-runner` (the task image;
@@ -118,27 +170,33 @@ Changing a wire format is a breaking change: update README and tests together.
 - The orchestrator container talks to the **host** daemon through the
   mounted socket, runs as uid 65532 with `group_add: ${DOCKER_GID}`,
   read-only rootfs, no caps, `mem_limit: 64m`. It joins the shared
-  `hostprobe-backend` network to reach event bus / database services.
+  `${BACKEND_NETWORK:-swarm-backend}` network to reach event bus / database
+  services.
   Task containers are siblings on the host and cannot reach that network
   (verified by the isolation integration test).
 - Job files: `jobs/` is mounted read-only at `/jobs`. Report → stdout, events
   → stderr (container fs is read-only; redirect on the host).
+- Naming is parameterised, never hard-coded: `IMAGE_NAMESPACE`,
+  `BACKEND_NETWORK`, `LABEL_PREFIX`, `BRIDGE_PREFIX` (see `.env.example`).
+  `LABEL_PREFIX`/`BRIDGE_PREFIX` reach the binary as
+  `ORCHESTRATOR_LABEL_PREFIX`/`ORCHESTRATOR_BRIDGE_PREFIX` and the guard as
+  `BRIDGE_PREFIX`; the guard and the orchestrator must agree on the bridge
+  prefix or the firewall matches nothing.
 - `init: true` forwards SIGTERM (`docker stop`, `compose down`) so the
   orchestrator reaps its task containers.
 
 ## Commands
 
 ```sh
-cd apps/orchestrator
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 cargo test                                                   # unit + architecture
 sudo sandbox-guard/guard.sh apply                            # host firewall (once per boot)
-cargo test -p infrastructure --test docker -- --ignored      # needs Docker + guard
+cargo test --test docker -- --ignored                        # needs Docker + guard
 cargo build --release                                        # target/release/orchestrator
-docker build -t hostprobe/goose-runner:latest runner         # task image
+docker build -t swarm/goose-runner:latest runner              # task image
 
-# via compose, from the repo root
+# via compose
 docker compose --profile orchestrator build
 docker compose --progress quiet run --rm -T orchestrator run /examples/hello.json \
   > report.json 2> events.ndjson
@@ -150,5 +208,5 @@ docker compose --progress quiet run --rm -T orchestrator run /examples/hello.jso
 - Errors: domain/application use small typed errors; `thiserror` in adapters;
   no `unwrap()` outside tests.
 - Ports use native `async fn` in traits (static dispatch, no boxing).
-- Tests: fakes for ports live in the test files (`application/tests`); keep
+- Tests: fakes for ports live in the test files (`tests/run_job.rs`); keep
   them deterministic (no real sleeps beyond a few ms).

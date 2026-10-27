@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use crate::error::ValidationError;
+use crate::domain::error::ValidationError;
 
 /// Ids end up in container names and labels, so they are restricted to a
 /// charset Docker accepts.

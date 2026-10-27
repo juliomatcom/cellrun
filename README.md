@@ -1,4 +1,4 @@
-# orchestrator
+# swarm
 
 Tiny Docker orchestrator: give it a JSON job, it runs each task in its own
 **ephemeral container**, executes the task's shell steps in order, streams
@@ -16,7 +16,7 @@ its own container: root, a writable filesystem and the public internet.
 - **Own network per task:** each container is the only member of its own
   bridge network, so tasks cannot see each other.
 - **No host access:** `sandbox-guard` installs host firewall rules on those
-  bridges (`hp*` interfaces). Tasks cannot reach any host address, the LAN,
+  bridges (`sw*` interfaces by default, see `BRIDGE_PREFIX`). Tasks cannot reach any host address, the LAN,
   cloud metadata (169.254.169.254) or other containers. Public internet still
   works.
 - **Nothing shared:** no bind mounts, no volumes and no Docker socket.
@@ -30,7 +30,7 @@ its own container: root, a writable filesystem and the public internet.
 
 ## Quick start (Docker Compose, recommended)
 
-From the repo root:
+From the repo root (the `.env.example` defaults work as-is apart from `DOCKER_GID`):
 
 ```sh
 cp .env.example .env    # set DOCKER_GID (stat -c %g /var/run/docker.sock) and API keys
@@ -66,16 +66,15 @@ docker compose --progress quiet run --rm -T orchestrator run /examples/hello.jso
 - `sandbox-guard` runs first automatically and installs the firewall rules
   (idempotent). The orchestrator drives the host's Docker daemon via the
   mounted socket as a non-root user in the docker group, and sits on the
-  shared `hostprobe-backend` network to reach services such as an event bus
+  shared `swarm-backend` network (`BACKEND_NETWORK`) to reach services such as an event bus
   or database. Task containers cannot reach that network. `docker stop` / Ctrl-C removes all task containers and networks.
 
 ## Quick start (bare binary)
 
 ```sh
 sudo sandbox-guard/guard.sh apply          # host firewall for task networks (once per boot)
-cd apps/orchestrator
 cargo build --release
-docker build -t hostprobe/goose-runner:latest runner     # Debian + Goose
+docker build -t swarm/goose-runner:latest runner     # Debian + Goose
 
 ./target/release/orchestrator run examples/hello.json            # report -> stdout, events -> stderr
 OPENAI_API_KEY=... ./target/release/orchestrator run examples/goose.json \
@@ -100,7 +99,7 @@ networks are removed; concurrent runs of the same job are not touched).
 {
   "id": "demo",                    // [A-Za-z0-9_.-], default "job"
   "defaults": {                    // any container field, inherited by tasks
-    "image": "hostprobe/goose-runner:latest",
+    "image": "swarm/goose-runner:latest",
     "env": { "TZ": "UTC" },
     "env_passthrough": ["OPENAI_API_KEY"],  // copied from orchestrator env
     "workdir": "/workspace",
@@ -149,7 +148,7 @@ One Goose task, OpenAI:
 ```json
 {
   "id": "fix",
-  "defaults": { "image": "hostprobe/goose-runner:latest", "memory_mb": 256,
+  "defaults": { "image": "swarm/goose-runner:latest", "memory_mb": 256,
                 "env_passthrough": ["OPENAI_API_KEY"], "timeout_secs": 900 },
   "tasks": [{ "id": "t", "steps": [
     "git clone --depth 1 https://github.com/you/repo . ",
@@ -237,7 +236,7 @@ event explains why. Example: a task with `memory_mb: 32` that allocates
 
 ## Runner image
 
-[`runner/Dockerfile`](runner/Dockerfile) → `hostprobe/goose-runner`:
+[`runner/Dockerfile`](runner/Dockerfile) → `swarm/goose-runner` (`${IMAGE_NAMESPACE}/goose-runner`):
 `debian:bookworm-slim` + git, curl, ripgrep, jq… + a pinned
 [Goose](https://github.com/block/goose) (`--build-arg GOOSE_VERSION=…`),
 running as root in `/workspace` (full access inside; see
@@ -303,4 +302,25 @@ That allows 256 networks. Task networks stay isolated whatever their subnet.
 
 ## Architecture
 
-Clean Architecture, one crate per circle; see [AGENTS.md](AGENTS.md).
+One plain crate (`src/`), Clean Architecture modules `domain` ←
+`application` ← `infrastructure` ← `main.rs`, checked by `tests/architecture.rs`;
+see [AGENTS.md](AGENTS.md).
+
+## Embedding
+
+Swarm is project-agnostic. Everything that names things is a variable with a
+neutral default, so a parent project can add it as a git submodule and keep
+its own conventions:
+
+| Variable (`.env`) | Binary flag / env | Default | Controls |
+|---|---|---|---|
+| `IMAGE_NAMESPACE` | — | `swarm` | image names `<ns>/orchestrator`, `/sandbox-guard`, `/goose-runner` |
+| `BACKEND_NETWORK` | — | `swarm-backend` | shared compose network |
+| `LABEL_PREFIX` | `--label-prefix` / `ORCHESTRATOR_LABEL_PREFIX` | `swarm` | labels `<prefix>.orchestrator`, `.job`, `.task`, `.run` |
+| `BRIDGE_PREFIX` | `--bridge-prefix` / `ORCHESTRATOR_BRIDGE_PREFIX` | `sw` | task bridge interfaces, container/network names, firewall match (1–2 chars `[a-z0-9]`) |
+
+Include it from a parent compose file with
+`include: [{ path: vendor/swarm/compose.yaml, env_file: [swarm.env, .env] }]`
+(later files win). Parent-side compose overrides can be listed as extra
+`path` entries. Tasks created under one `LABEL_PREFIX` are only found by
+`cleanup` under the same prefix.

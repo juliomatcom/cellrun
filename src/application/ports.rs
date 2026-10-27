@@ -2,7 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use domain::{ContainerSpec, Event, JobId, MemoryUsage, StreamKind, TaskId};
+use crate::domain::{ContainerSpec, Event, JobId, MemoryUsage, StreamKind, TaskId};
 
 /// Error reported by a [`ContainerRuntime`] implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]

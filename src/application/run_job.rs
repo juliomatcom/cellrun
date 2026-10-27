@@ -4,12 +4,12 @@ use std::time::Instant;
 
 use futures_util::stream::{self, StreamExt};
 
-use domain::{
+use crate::domain::{
     Event, Job, JobId, JobReport, LineSplitter, StepOutcome, StepReport, StreamKind, TailBuffer,
     Task, TaskId, TaskReport, TaskStatus,
 };
 
-use crate::ports::{ContainerRuntime, EventSink, ExecStatus, OutputObserver};
+use crate::application::ports::{ContainerRuntime, EventSink, ExecStatus, OutputObserver};
 
 /// Memory caps for captured output, per step and stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
