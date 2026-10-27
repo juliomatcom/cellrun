@@ -10,7 +10,7 @@ Engine API over `/var/run/docker.sock`).
 ## Isolation
 
 Every task runs in a throwaway container that is isolated from the host and
-from every other task. The workload inside (e.g. Goose) has full access to
+from every other task. The workload inside (e.g. a coding agent) has full access to
 its own container: root, a writable filesystem and the public internet.
 
 - **Own network per task:** each container is the only member of its own
@@ -34,7 +34,7 @@ From the repo root (the `.env.example` defaults work as-is apart from `DOCKER_GI
 
 ```sh
 cp .env.example .env    # set DOCKER_GID (stat -c %g /var/run/docker.sock) and API keys
-docker compose --profile orchestrator build            # orchestrator + Goose runner images
+docker compose --profile orchestrator build            # orchestrator + sandbox-guard images
 docker compose --progress quiet run --rm -T orchestrator run /examples/hello.json \
   > report.json 2> events.ndjson
 ```
@@ -50,11 +50,11 @@ docker compose --progress quiet run --rm -T orchestrator run /examples/hello.jso
   on stderr, the report prints on stdout at the end):
 
   ```sh
-  docker compose --progress quiet run --rm -T orchestrator run /jobs/goose.json
+  docker compose --progress quiet run --rm -T orchestrator run /jobs/my-job.json
   # report only, pretty-printed:
-  docker compose --progress quiet run --rm -T orchestrator run /jobs/goose.json 2>/dev/null | jq
+  docker compose --progress quiet run --rm -T orchestrator run /jobs/my-job.json 2>/dev/null | jq
   # report on screen and saved to a file:
-  docker compose --progress quiet run --rm -T orchestrator run /jobs/goose.json | tee report.json | jq
+  docker compose --progress quiet run --rm -T orchestrator run /jobs/my-job.json | tee report.json | jq
   ```
 - How many tasks run at once is set on the orchestrator, not in the job:
   `MAX_PARALLEL` in `.env` (default 2) → `ORCHESTRATOR_MAX_PARALLEL`.
@@ -74,10 +74,9 @@ docker compose --progress quiet run --rm -T orchestrator run /examples/hello.jso
 ```sh
 sudo sandbox-guard/guard.sh apply          # host firewall for task networks (once per boot)
 cargo build --release
-docker build -t swarm/goose-runner:latest runner     # Debian + Goose
 
 ./target/release/orchestrator run examples/hello.json            # report -> stdout, events -> stderr
-OPENAI_API_KEY=... ./target/release/orchestrator run examples/goose.json \
+API_KEY=... ./target/release/orchestrator run my-job.json \
     --max-parallel 1 --events run.ndjson --report report.json
 ```
 
@@ -99,9 +98,9 @@ networks are removed; concurrent runs of the same job are not touched).
 {
   "id": "demo",                    // [A-Za-z0-9_.-], default "job"
   "defaults": {                    // any container field, inherited by tasks
-    "image": "swarm/goose-runner:latest",
+    "image": "my-org/my-runner:latest",   // any image; swarm ships none
     "env": { "TZ": "UTC" },
-    "env_passthrough": ["OPENAI_API_KEY"],  // copied from orchestrator env
+    "env_passthrough": ["API_KEY"],  // copied from orchestrator env
     "workdir": "/workspace",
     "memory_mb": 256,              // hard RAM limit
     "swap_mb": 1024,               // swap on top of RAM (default 1024, 0 = none, max 2048)
@@ -115,7 +114,7 @@ networks are removed; concurrent runs of the same job are not touched).
       "image": "...",              // task fields override defaults; env maps merge
       "steps": [
         "echo plain string steps are fine",
-        { "name": "code", "run": "goose run --no-session --quiet --provider openai --model gpt-6-luna --with-builtin developer -t 'write fizzbuzz.sh'",
+        { "name": "build", "run": "make all",
           "timeout_secs": 900, "continue_on_error": false }
       ]
     }
@@ -142,42 +141,6 @@ Smallest job (no agent, just shell):
 ```json
 { "id": "hello", "tasks": [{ "id": "t", "image": "debian:bookworm-slim", "steps": ["echo hi"] }] }
 ```
-
-One Goose task, OpenAI:
-
-```json
-{
-  "id": "fix",
-  "defaults": { "image": "swarm/goose-runner:latest", "memory_mb": 256,
-                "env_passthrough": ["OPENAI_API_KEY"], "timeout_secs": 900 },
-  "tasks": [{ "id": "t", "steps": [
-    "git clone --depth 1 https://github.com/you/repo . ",
-    "goose run --no-session --quiet --provider openai --model gpt-6-luna --with-builtin developer -t 'Fix the failing test'"
-  ]}]
-}
-```
-
-To measure tokens, run Goose with `--output-format json` and print its
-`metadata` (the step keeps Goose's exit code):
-
-```sh
-goose run --no-session --quiet --output-format json --provider openai --model gpt-6-luna \
-  --with-builtin developer -t '...' > /tmp/goose.json; rc=$?
-jq -c '{tokens: .metadata}' /tmp/goose.json; exit $rc
-```
-
-The step's output (event and `stdout_tail`) then ends with e.g.
-`{"tokens":{"total_tokens":9169,"input_tokens":8952,"output_tokens":217,"cache_read_input_tokens":5849,"cache_write_input_tokens":3094,"cost_usd":0.00055464,"status":"completed"}}`
-(the fizzbuzz task). `cost_usd` is Goose's estimate from its price table.
-
-Same task on an open-weight model: change the step's `--provider`/`--model`
-and pass that provider's key, e.g. OpenRouter
-(`"env_passthrough": ["OPENROUTER_API_KEY"]`,
-`--provider openrouter --model qwen/qwen3-coder`) or a self-hosted
-OpenAI-compatible server such as vLLM or llama.cpp
-(`"env": {"OPENAI_HOST": "https://llm.example.com"}`, `--provider openai
---model <served-model>`). Any key a job passes through must also be listed
-under `environment:` in [`compose.yaml`](compose.yaml).
 
 ## Events (NDJSON)
 
@@ -234,46 +197,12 @@ setups); if the read fails entirely, `memory` is omitted and a `warning`
 event explains why. Example: a task with `memory_mb: 32` that allocates
 100 MiB ends with `exit_code: 137` and `"oom_kills": 1`.
 
-## Runner image
-
-[`runner/Dockerfile`](runner/Dockerfile) → `swarm/goose-runner` (`${IMAGE_NAMESPACE}/goose-runner`):
-`debian:bookworm-slim` + git, curl, ripgrep, jq… + a pinned
-[Goose](https://github.com/block/goose) (`--build-arg GOOSE_VERSION=…`),
-running as root in `/workspace` (full access inside; see
-[Isolation](#isolation)). It sets `GOOSE_MODE=auto` (tools run without
-approval; nobody is there to approve) and `GOOSE_DISABLE_KEYRING=1` (keys come
-from env vars). API keys are injected at run time via `env_passthrough`, never
-baked into the image. Provider and model are picked per step with
-`goose run --provider … --model …`: OpenAI, Anthropic, Gemini, OpenRouter,
-Groq, Ollama or any OpenAI-compatible endpoint, so open-weight models work too.
-
-### Why Goose (and not opencode)
-
-Measured on Docker Desktop (arm64), same fizzbuzz task, same model
-(`gpt-6-luna`), sampling the container's cgroup every 100 ms. "Process" is
-anonymous memory (heap, cannot be reclaimed); "total" adds page cache (e.g.
-the mapped binary, reclaimable).
-
-| | opencode 1.19.4 | Goose 1.56.0 |
-|---|---|---|
-| Startup only, no API call (process) | ~390–420 MiB | — |
-| Fizzbuzz task, peak process memory | **469 MiB** | **144 MiB** |
-| Fizzbuzz task, peak total | 512 MiB (at the limit) | 157 MiB |
-| Result at `memory_mb: 384` | killed (exit 137) | — |
-| Result at `memory_mb: 256` (via orchestrator) | — | succeeded |
-
-opencode is a JS app on the Bun runtime; `opencode run` boots its full agent
-server before doing anything, and neither `BUN_OPTIONS=--smol` nor its
-`OPENCODE_DISABLE_*` flags moved the number by more than ~10 MiB. Goose is a
-native (Rust) binary, so one task fits in 256 MiB with headroom.
-
 ## Memory sizing on a 1 GiB VM
 
 The orchestrator itself needs a few MiB (compose caps it at 64 MiB). Budget the rest as
 `MAX_PARALLEL × memory_mb` + Docker daemon (~100 MiB) + OS. gVisor adds
-roughly 20–50 MiB per running task. Goose tasks use `memory_mb: 256` (peak
-~144 MiB on a small task, see [Why Goose](#why-goose-and-not-opencode)), so
-`MAX_PARALLEL=2` uses ~512 MiB for tasks and fits a 1 GiB VM.
+roughly 20–50 MiB per running task. For example
+`memory_mb: 256` with `MAX_PARALLEL=2` uses ~512 MiB for tasks and fits a 1 GiB VM.
 
 Each task may also use up to `swap_mb` (default 1 GiB) of swap beyond its RAM
 limit. **The host must have swap for this to take effect**; on a Debian VM
@@ -314,7 +243,7 @@ its own conventions:
 
 | Variable (`.env`) | Binary flag / env | Default | Controls |
 |---|---|---|---|
-| `IMAGE_NAMESPACE` | — | `swarm` | image names `<ns>/orchestrator`, `/sandbox-guard`, `/goose-runner` |
+| `IMAGE_NAMESPACE` | — | `swarm` | image names `<ns>/orchestrator`, `<ns>/sandbox-guard` |
 | `BACKEND_NETWORK` | — | `swarm-backend` | shared compose network |
 | `LABEL_PREFIX` | `--label-prefix` / `ORCHESTRATOR_LABEL_PREFIX` | `swarm` | labels `<prefix>.orchestrator`, `.job`, `.task`, `.run` |
 | `BRIDGE_PREFIX` | `--bridge-prefix` / `ORCHESTRATOR_BRIDGE_PREFIX` | `sw` | task bridge interfaces, container/network names, firewall match (1–2 chars `[a-z0-9]`) |

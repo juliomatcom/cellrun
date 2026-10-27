@@ -1,5 +1,4 @@
 target/
-runner/
 .git/
 **/*.md
 !README.md

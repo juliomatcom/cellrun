@@ -3,10 +3,10 @@
 //! ```json
 //! {
 //!   "id": "demo",
-//!   "defaults": { "image": "swarm/goose-runner:latest",
-//!                 "env_passthrough": ["OPENAI_API_KEY"], "memory_mb": 256 },
+//!   "defaults": { "image": "my-org/runner:latest",
+//!                 "env_passthrough": ["API_KEY"], "memory_mb": 256 },
 //!   "tasks": [
-//!     { "id": "hello", "steps": ["echo hi", { "run": "goose run -t 'fix bug'", "timeout_secs": 900 }] }
+//!     { "id": "hello", "steps": ["echo hi", { "run": "make test", "timeout_secs": 900 }] }
 //!   ]
 //! }
 //! ```
@@ -314,10 +314,7 @@ mod tests {
     #[test]
     fn bundled_examples_are_valid() {
         let any_env = |_: &str| Some("x".to_owned());
-        for example in [
-            &include_bytes!("../../examples/hello.json")[..],
-            &include_bytes!("../../examples/goose.json")[..],
-        ] {
+        for example in [&include_bytes!("../../examples/hello.json")[..]] {
             parse_job(example, any_env).unwrap();
         }
     }

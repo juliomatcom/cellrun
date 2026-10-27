@@ -38,9 +38,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./jobs:/jobs:ro
     environment:
-      # Names only: values come from the shell or .env and are forwarded to
-      # task containers via `env_passthrough` in the job file.
-      - OPENAI_API_KEY
+      # Secrets for tasks: an embedding project adds variable NAMES here (via
+      # an extra compose file); values come from the shell or .env and are
+      # forwarded to task containers via `env_passthrough` in the job file.
       # Task containers alive at once (host capacity, not a job setting).
       - ORCHESTRATOR_MAX_PARALLEL=${MAX_PARALLEL:-2}
       - ORCHESTRATOR_TASK_RUNTIME=${TASK_RUNTIME:-}
@@ -62,13 +62,6 @@ services:
     restart: "no"
     environment:
       - BRIDGE_PREFIX=${BRIDGE_PREFIX:-sw}
-
-  # Build-only service for the image task containers start from (Goose).
-  goose-runner:
-    build: ./runner
-    image: ${IMAGE_NAMESPACE:-swarm}/goose-runner:latest
-    profiles: ["orchestrator"]
-    entrypoint: ["true"]
 
 networks:
   # Service network. A parent project that wants to share it declares it with

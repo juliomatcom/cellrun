@@ -16,7 +16,6 @@ an env var or a compose variable with a neutral default.
 ├── compose.yaml             # services; usable standalone or `include`d
 ├── .env.example             # compose variables
 ├── Dockerfile               # production image (multi-stage, distroless)
-├── runner/                  # task image (Goose)
 ├── sandbox-guard/           # host firewall one-shot
 ├── examples/  jobs/         # sample jobs (baked in) / local jobs (git-ignored)
 └── .github/workflows/ci.yml
@@ -63,7 +62,7 @@ Target: a VM with ~1 GiB RAM. The orchestrator itself idles at a few MiB.
 ## Isolation model (the core requirement)
 
 Each task container is fully isolated **from the host and from every other
-task**, while the workload inside (e.g. Goose) has **full access** to its
+task**, while the workload inside (e.g. a coding agent) has **full access** to its
 own container: root, writable filesystem, public internet.
 
 | Layer | Mechanism | Where |
@@ -165,8 +164,10 @@ Changing a wire format is a breaking change: update README and tests together.
 - `compose.yaml` (standalone, or `include`d by a parent project), all under profile
   `orchestrator` (run-to-completion): `sandbox-guard` (one-shot, host
   network, NET_ADMIN, installs firewall rules), `orchestrator` (depends on
-  the guard having completed) and build-only `goose-runner` (the task image;
-  Goose replaced opencode for memory: ~144 vs ~469 MiB peak, see README).
+  the guard having completed). Swarm ships **no task image**: runners (the
+  images tasks start from) belong to the app that embeds swarm, which also
+  adds provider-secret names to the orchestrator's `environment:` through an
+  extra compose file.
 - The orchestrator container talks to the **host** daemon through the
   mounted socket, runs as uid 65532 with `group_add: ${DOCKER_GID}`,
   read-only rootfs, no caps, `mem_limit: 64m`. It joins the shared
@@ -194,7 +195,6 @@ cargo test                                                   # unit + architectu
 sudo sandbox-guard/guard.sh apply                            # host firewall (once per boot)
 cargo test --test docker -- --ignored                        # needs Docker + guard
 cargo build --release                                        # target/release/orchestrator
-docker build -t swarm/goose-runner:latest runner              # task image
 
 # via compose
 docker compose --profile orchestrator build
