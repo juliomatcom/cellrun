@@ -1,4 +1,4 @@
-//! Final job report as JSON (what the orchestrator "returns").
+//! Final job report as JSON (what the dispatcher "returns").
 
 use std::io::Write;
 

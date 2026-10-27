@@ -1,91 +1,90 @@
 # swarm
 
-Tiny Docker orchestrator: give it a JSON job, it runs each task in its own
+Tiny Docker job dispatcher: give it a JSON job, it runs each task in its own
 **ephemeral container**, executes the task's shell steps in order, streams
 every output line as NDJSON, and writes a JSON report. Built for small VMs
-(~1 GiB RAM): ~2 MB binary, single-threaded async runtime, a few
+(~1 GiB RAM): one ~2 MB binary (`dispatcher`), single-threaded async runtime, a few
 MiB RSS, bounded output buffers, no `docker` CLI processes (talks to the
 Engine API over `/var/run/docker.sock`).
 
+Swarm is only the engine: no compose file, images, services or firewall.
+Projects that use it build the binary into their own image and own the host
+setup (see "Host firewall" and "Using swarm from another project").
+
 ## Isolation
 
-Every task runs in a throwaway container that is isolated from the host and
-from every other task. The workload inside (e.g. a coding agent) has full access to
-its own container: root, a writable filesystem and the public internet.
+Every task runs in a throwaway container. The workload inside (e.g. a coding
+agent) has full access to its own container: root, a writable filesystem and
+the public internet.
+
+**What swarm does:**
 
 - **Own network per task:** each container is the only member of its own
-  bridge network, so tasks cannot see each other.
-- **No host access:** `sandbox-guard` installs host firewall rules on those
-  bridges (`sw*` interfaces by default, see `BRIDGE_PREFIX`). Tasks cannot reach any host address, the LAN,
-  cloud metadata (169.254.169.254) or other containers. Public internet still
-  works.
+  bridge network (`<bridge-prefix><hex>`, `sw<hex>` by default), so tasks
+  cannot see each other or other Docker networks.
 - **Nothing shared:** no bind mounts, no volumes and no Docker socket.
   Containers and networks are deleted when the task ends.
-- **Separate kernel (optional, recommended):** set `TASK_RUNTIME=runsc` to run
-  tasks under [gVisor](https://gvisor.dev). Root inside the container then
-  never touches the host kernel directly. Install `runsc` on the host and
-  register it with Docker first (`runsc install && systemctl restart docker`).
 - **Not configurable from job files:** jobs cannot change networking,
   mounts or privileges.
+- **Separate kernel (optional, recommended):** `--task-runtime runsc` runs
+  tasks under [gVisor](https://gvisor.dev), so root inside the container never
+  touches the host kernel directly (install `runsc` and register it with
+  Docker first: `runsc install && systemctl restart docker`).
 
-## Quick start (Docker Compose, recommended)
+**What swarm does NOT do: the host firewall.** See below. Without it, a task
+can reach the host itself, your LAN and cloud metadata.
 
-From the repo root (the `.env.example` defaults work as-is apart from `DOCKER_GID`):
+## Host firewall (your responsibility)
+
+> [!IMPORTANT]
+> Swarm does not install firewall rules and does not test them. Whoever runs
+> the dispatcher must apply them **before any task starts, after every boot**
+> (iptables rules are not persistent), and should test them on that host.
+
+Required rules, for the bridge prefix the dispatcher uses (`--bridge-prefix`,
+here `sw`; `sw+` matches every task bridge):
 
 ```sh
-cp .env.example .env    # set DOCKER_GID (stat -c %g /var/run/docker.sock) and API keys
-docker compose --profile orchestrator build            # orchestrator + sandbox-guard images
-docker compose --progress quiet run --rm -T orchestrator run /examples/hello.json \
-  > report.json 2> events.ndjson
+# 1. Tasks cannot reach any address of the host (bridge gateway, docker0, LAN/public IPs).
+iptables -I INPUT 1 -i sw+ -j DROP
+# 2. Tasks cannot reach private, link-local (cloud metadata), CGNAT, multicast ranges.
+iptables -I DOCKER-USER 1 -i sw+ \
+  -d 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10,0.0.0.0/8,224.0.0.0/4,240.0.0.0/4 \
+  -j DROP
+# 3. IPv6 (task networks have it disabled; defense in depth).
+ip6tables -I INPUT 1 -i sw+ -j DROP
+ip6tables -I DOCKER-USER 1 -i sw+ -j DROP
 ```
 
-- `DOCKER_GID` is host-specific and is the usual cause of
-  `docker unreachable`: on a Linux host (e.g. the Debian prod VM) use the
-  output of `stat -c %g /var/run/docker.sock` run on that host; on Docker
-  Desktop (macOS/Windows) use `0`. To check what containers actually see:
-  `docker run --rm -v /var/run/docker.sock:/s alpine stat -c %g /s`.
-- Put your own job files in [`jobs/`](jobs) → available at `/jobs/<file>.json`
-  (git-ignored; temporary until jobs come from a database).
-- To watch a run in the terminal instead, drop the redirects (events stream
-  on stderr, the report prints on stdout at the end):
+Use the backend Docker programs (`iptables-nft` or `iptables-legacy`: the one
+whose `DOCKER-USER` chain exists), insert each rule only once, and keep
+public internet open (tasks need it). **Check it works:** from a task, the
+host, a LAN address and `169.254.169.254` must time out, while e.g.
+`https://example.com` still loads.
 
-  ```sh
-  docker compose --progress quiet run --rm -T orchestrator run /jobs/my-job.json
-  # report only, pretty-printed:
-  docker compose --progress quiet run --rm -T orchestrator run /jobs/my-job.json 2>/dev/null | jq
-  # report on screen and saved to a file:
-  docker compose --progress quiet run --rm -T orchestrator run /jobs/my-job.json | tee report.json | jq
-  ```
-- How many tasks run at once is set on the orchestrator, not in the job:
-  `MAX_PARALLEL` in `.env` (default 2) → `ORCHESTRATOR_MAX_PARALLEL`.
-- `-T` keeps stdout (report) and stderr (events) separate; `--progress quiet`
-  keeps Compose's own messages out of the event stream.
-- Variables listed in the job's `env_passthrough` must be set in `.env` (and
-  listed under `environment:` in [`compose.yaml`](compose.yaml)); empty
-  values are rejected.
-- `sandbox-guard` runs first automatically and installs the firewall rules
-  (idempotent). The orchestrator drives the host's Docker daemon via the
-  mounted socket as a non-root user in the docker group, and sits on the
-  shared `swarm-backend` network (`BACKEND_NETWORK`) to reach services such as an event bus
-  or database. Task containers cannot reach that network. `docker stop` / Ctrl-C removes all task containers and networks.
-
-## Quick start (bare binary)
+## Quick start
 
 ```sh
-sudo sandbox-guard/guard.sh apply          # host firewall for task networks (once per boot)
+# apply the host firewall above (once per boot), then:
 cargo build --release
 
-./target/release/orchestrator run examples/hello.json            # report -> stdout, events -> stderr
-API_KEY=... ./target/release/orchestrator run my-job.json \
+./target/release/dispatcher run examples/hello.json            # report -> stdout, events -> stderr
+API_KEY=... ./target/release/dispatcher run my-job.json \
     --max-parallel 1 --events run.ndjson --report report.json
 ```
 
 ```
-orchestrator run <JOB|-> [--events <PATH|->] [--report <PATH|->]
-                         [--pull missing|always|never] [--tail-bytes N]
-                         [--max-parallel N]   # env ORCHESTRATOR_MAX_PARALLEL, default 2
-orchestrator validate <JOB|->
-orchestrator cleanup <JOB_ID>        # remove leftovers of a job (ALL runs of that id)
+dispatcher run <JOB|-> [--events <PATH|->] [--report <PATH|->]
+                       [--pull missing|always|never] [--tail-bytes N]
+                       [--max-parallel N]   # env DISPATCHER_MAX_PARALLEL, default 2
+dispatcher validate <JOB|->
+dispatcher cleanup <JOB_ID>          # remove leftovers of a job (ALL runs of that id)
+
+Host settings (flag / env, never from job files):
+  --task-runtime  DISPATCHER_TASK_RUNTIME   OCI runtime for tasks, e.g. runsc (gVisor)
+  --task-dns      DISPATCHER_TASK_DNS       public DNS for tasks (default 1.1.1.1,8.8.8.8)
+  --label-prefix  DISPATCHER_LABEL_PREFIX   labels <prefix>.dispatcher/.job/.task/.run (default swarm)
+  --bridge-prefix DISPATCHER_BRIDGE_PREFIX  task bridges <prefix><hex> (default sw; 1-2 chars [a-z0-9])
 ```
 
 Exit codes: `0` all tasks succeeded · `1` some task failed · `2` invalid
@@ -100,7 +99,7 @@ networks are removed; concurrent runs of the same job are not touched).
   "defaults": {                    // any container field, inherited by tasks
     "image": "my-org/my-runner:latest",   // any image; swarm ships none
     "env": { "TZ": "UTC" },
-    "env_passthrough": ["API_KEY"],  // copied from orchestrator env
+    "env_passthrough": ["API_KEY"],  // copied from the dispatcher env
     "workdir": "/workspace",
     "memory_mb": 256,              // hard RAM limit
     "swap_mb": 1024,               // swap on top of RAM (default 1024, 0 = none, max 2048)
@@ -130,9 +129,10 @@ be stopped without destroying the container, so later steps would race with
 it. `memory_mb` and `pids` must be > 0 (Docker reads 0 as "unlimited").
 `swap_mb` only applies with `memory_mb`; it defaults to 1024 and is capped at
 2048. Unknown fields are rejected, including `max_parallel`: parallelism is
-host capacity, so it is set on the orchestrator (`--max-parallel` /
-`ORCHESTRATOR_MAX_PARALLEL`), never by a job. A missing `env_passthrough`
-variable is an input error.
+host capacity, so it is set on the dispatcher (`--max-parallel` /
+`DISPATCHER_MAX_PARALLEL`), never by a job. Variables listed in
+`env_passthrough` are copied from the dispatcher's environment (keeps secrets
+out of job files); a missing or empty one is an input error.
 
 ### Examples
 
@@ -199,7 +199,7 @@ event explains why. Example: a task with `memory_mb: 32` that allocates
 
 ## Memory sizing on a 1 GiB VM
 
-The orchestrator itself needs a few MiB (compose caps it at 64 MiB). Budget the rest as
+The dispatcher itself needs a few MiB. Budget the rest as
 `MAX_PARALLEL × memory_mb` + Docker daemon (~100 MiB) + OS. gVisor adds
 roughly 20–50 MiB per running task. For example
 `memory_mb: 256` with `MAX_PARALLEL=2` uses ~512 MiB for tasks and fits a 1 GiB VM.
@@ -218,7 +218,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ## Concurrency limit: Docker address pools
 
 Each running task owns one network. Docker's default address pools allow
-only about 30 networks on a host (including compose networks), so more
+only about 30 networks on a host (including any other networks), so more
 concurrent tasks fail with `address pools are exhausted`. To raise the
 ceiling, hand out small subnets in `/etc/docker/daemon.json` and restart
 Docker:
@@ -235,21 +235,20 @@ One plain crate (`src/`), Clean Architecture modules `domain` ←
 `application` ← `infrastructure` ← `main.rs`, checked by `tests/architecture.rs`;
 see [AGENTS.md](AGENTS.md).
 
-## Embedding
+## Using swarm from another project
 
-Swarm is project-agnostic. Everything that names things is a variable with a
-neutral default, so a parent project can add it as a git submodule and keep
-its own conventions:
+Add this repo as a git submodule and treat it as a black box with a CLI
+contract: job JSON in; events, report and exit code out (all above). Then:
 
-| Variable (`.env`) | Binary flag / env | Default | Controls |
-|---|---|---|---|
-| `IMAGE_NAMESPACE` | — | `swarm` | image names `<ns>/orchestrator`, `<ns>/sandbox-guard` |
-| `BACKEND_NETWORK` | — | `swarm-backend` | shared compose network |
-| `LABEL_PREFIX` | `--label-prefix` / `ORCHESTRATOR_LABEL_PREFIX` | `swarm` | labels `<prefix>.orchestrator`, `.job`, `.task`, `.run` |
-| `BRIDGE_PREFIX` | `--bridge-prefix` / `ORCHESTRATOR_BRIDGE_PREFIX` | `sw` | task bridge interfaces, container/network names, firewall match (1–2 chars `[a-z0-9]`) |
-
-Include it from a parent compose file with
-`include: [{ path: vendor/swarm/compose.yaml, env_file: [swarm.env, .env] }]`
-(later files win). Parent-side compose overrides can be listed as extra
-`path` entries. Tasks created under one `LABEL_PREFIX` are only found by
-`cleanup` under the same prefix.
+1. **Build the binary** into your own image or host:
+   `cargo build --release --locked --bin dispatcher` (in a multi-stage
+   Dockerfile, copy `target/release/dispatcher` into e.g.
+   `gcr.io/distroless/cc-debian12:nonroot`).
+2. **Give it the Docker socket** (`/var/run/docker.sock`); as non-root, add
+   the user to the socket's group. Task containers are siblings on the host.
+3. **Apply the host firewall** (see "Host firewall") before any task runs,
+   after every boot, for the same `--bridge-prefix`, and test it on that
+   host. Swarm does not do this for you.
+4. **Pick your own names:** `--label-prefix` and `--bridge-prefix` (use a
+   bridge prefix no other swarm user on the host has). `cleanup` only finds
+   resources carrying the label prefix in use.

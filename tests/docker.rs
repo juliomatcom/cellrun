@@ -2,7 +2,7 @@
 //!
 //! Ignored by default; run with:
 //! `cargo test -p infrastructure --test docker -- --ignored`
-//! Override the image with `ORCHESTRATOR_TEST_IMAGE` (default `debian:bookworm-slim`).
+//! Override the image with `DISPATCHER_TEST_IMAGE` (default `debian:bookworm-slim`).
 
 use std::time::Duration;
 
@@ -26,7 +26,7 @@ impl OutputObserver for Collect {
 }
 
 fn image() -> String {
-    std::env::var("ORCHESTRATOR_TEST_IMAGE").unwrap_or_else(|_| "debian:bookworm-slim".into())
+    std::env::var("DISPATCHER_TEST_IMAGE").unwrap_or_else(|_| "debian:bookworm-slim".into())
 }
 
 #[tokio::test]
@@ -96,9 +96,10 @@ async fn remove_job_reaps_labelled_containers() {
 
 // -------------------------------------------------------------- isolation --
 //
-// Requires the host firewall: `sudo sandbox-guard/guard.sh apply`.
-
-use std::net::UdpSocket;
+// What swarm itself guarantees: tasks cannot reach each other or other Docker
+// networks, and have full access inside. Blocking the host, the LAN and cloud
+// metadata is the host firewall's job, which the user of swarm owns (README,
+// "Host firewall"); test that where the firewall is applied.
 
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig, NetworkCreateRequest};
@@ -107,8 +108,8 @@ use bollard::query_parameters::{CreateContainerOptionsBuilder, RemoveContainerOp
 const BACKEND_NET: &str = "it-isolation-backend";
 const BACKEND_SVC: &str = "it-isolation-backend-svc";
 
-/// Stands in for an event bus / database on the shared service network
-/// (`swarm-backend` in compose). Returns its IP.
+/// Stands in for another app's service on its own Docker network (e.g. a
+/// database). Returns its IP.
 async fn start_backend_service(docker: &Docker) -> String {
     remove_backend_service(docker).await;
     docker
@@ -175,8 +176,8 @@ fn ip_of(runtime_out: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires a Docker daemon and sandbox-guard rules"]
-async fn task_containers_are_isolated_from_host_and_each_other() {
+#[ignore = "requires a Docker daemon"]
+async fn task_containers_are_isolated_from_each_other() {
     let runtime = DockerRuntime::connect(DockerConfig::default()).unwrap();
     let job = JobId::new("it-isolation").unwrap();
     let spec = ContainerSpec::new(image()).unwrap();
@@ -192,28 +193,17 @@ async fn task_containers_are_isolated_from_host_and_each_other() {
         .await
         .unwrap();
 
-    let a_ip = ip_of(&sh(&runtime, &a, "hostname -i").await);
     let b_ip = ip_of(&sh(&runtime, &b, "hostname -i").await);
-    let gateway = format!("{}.1", a_ip.rsplit_once('.').unwrap().0);
-    let mut targets = vec![
-        format!("{gateway}:9"),          // host, via the task's own bridge
-        "172.17.0.1:9".to_owned(),       // host, via docker0
-        format!("{b_ip}:9"),             // the other task
-        "169.254.169.254:80".to_owned(), // cloud metadata
-        format!("{backend_ip}:9"),       // services on the shared backend network
+    let targets = [
+        format!("{b_ip}:9"),       // the other task
+        format!("{backend_ip}:9"), // a service on another Docker network
     ];
-    // The host's primary address (no packet is sent by `connect`).
-    if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
-        if s.connect("1.1.1.1:80").is_ok() {
-            targets.push(format!("{}:9", s.local_addr().unwrap().ip()));
-        }
-    }
 
     let report = sh(&runtime, &a, &probe(&targets)).await;
     for t in &targets {
         assert!(
             report.contains(&format!("{t} BLOCKED")),
-            "{t} is reachable from a task (is sandbox-guard applied?):\n{report}"
+            "{t} is reachable from a task:\n{report}"
         );
     }
 

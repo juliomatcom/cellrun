@@ -6,12 +6,3 @@ target/
 .vscode/
 *.swp
 .DS_Store
-
-# Local env / secrets
-.env
-.env.*
-!.env.example
-
-# Temporary local job files; jobs will come from a database.
-jobs/*
-!jobs/README.md

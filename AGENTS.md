@@ -1,25 +1,26 @@
 # AGENTS.md — swarm
 
 Guidance for humans and coding agents working in this repository. Swarm is a
-standalone, reusable crate: it knows nothing about the projects that embed it
-(see README, "Embedding"). Keep it that way: no project names, image
-namespaces or network names baked in; anything environment-specific is a flag,
-an env var or a compose variable with a neutral default.
+standalone, reusable crate: it knows nothing about the projects that use it
+(see README, "Using swarm from another project"). Keep it that way: no
+project names baked in; anything environment-specific is a flag or an env
+var with a neutral default.
 
 ## Repository layout
 
 ```
 .
-├── Cargo.toml / Cargo.lock  # one plain crate: lib `swarm` + bin `orchestrator`
+├── Cargo.toml / Cargo.lock  # one plain crate: lib `swarm` + bin `dispatcher`
 ├── src/                     # all Rust code (layers below)
 ├── tests/                   # integration + architecture tests
-├── compose.yaml             # services; usable standalone or `include`d
-├── .env.example             # compose variables
-├── Dockerfile               # production image (multi-stage, distroless)
-├── sandbox-guard/           # host firewall one-shot
-├── examples/  jobs/         # sample jobs (baked in) / local jobs (git-ignored)
+├── examples/                # sample jobs
 └── .github/workflows/ci.yml
 ```
+
+Swarm is **only the engine**. No compose file, Dockerfile, images, services,
+env files or host firewall live here: projects that use swarm build the
+binary into their own image and own their host setup (README, "Host
+firewall" and "Using swarm from another project"). Don't add them back.
 
 ## Architecture: Clean Architecture
 
@@ -46,9 +47,9 @@ serialized directly.
 - **Secrets:** never in source, job files, logs or reports. Pass via env.
 - **Before pushing:** `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`,
   `cargo test`. Keep changes minimal; match surrounding style.
-- **No breaking changes** to the wire formats, flags, env vars, exit codes or
-  compose variables without updating README and tests together (embedders pin
-  this repo as a submodule).
+- **No breaking changes** to the wire formats, flags, env vars or exit codes
+  without updating README and tests together (users pin this repo as a
+  submodule).
 
 ## What it is
 
@@ -57,7 +58,7 @@ Docker container per task**, runs each task's shell steps inside it via
 `docker exec`, streams every output line as an NDJSON event and finally writes
 a JSON report. Containers are always force-removed (also on SIGINT/SIGTERM).
 
-Target: a VM with ~1 GiB RAM. The orchestrator itself idles at a few MiB.
+Target: a VM with ~1 GiB RAM. The dispatcher itself idles at a few MiB.
 
 ## Isolation model (the core requirement)
 
@@ -68,12 +69,12 @@ own container: root, writable filesystem, public internet.
 | Layer | Mechanism | Where |
 |---|---|---|
 | Network: other tasks | one bridge network per task (sole member), ICC off | `docker.rs` |
-| Network: host + LAN + metadata | bridges named `<bridge-prefix><hex>` (default `sw`); host firewall drops `-i <prefix>+` to INPUT and to private ranges in DOCKER-USER | `sandbox-guard/guard.sh` |
+| Network: host + LAN + metadata | bridges named `<bridge-prefix><hex>` (default `sw`); a host firewall must drop `-i <prefix>+` to INPUT and to private ranges in DOCKER-USER | **the caller** (README, "Host firewall") |
 | DNS | explicit public resolvers (private ranges are dropped) | `--task-dns` |
 | Filesystem | no bind mounts, no volumes, no docker socket; anonymous volumes removed with the container | `docker.rs` |
-| Kernel (optional) | `--task-runtime runsc` (gVisor) | `TASK_RUNTIME` in `.env` |
+| Kernel (optional) | `--task-runtime runsc` (gVisor) | `--task-runtime` / `DISPATCHER_TASK_RUNTIME` |
 | Resources | memory (+ swap, default 1 GiB), CPU, pids limits | job file + defaults |
-| Parallelism | containers alive at once | `--max-parallel` / `ORCHESTRATOR_MAX_PARALLEL` (never the job) |
+| Parallelism | containers alive at once | `--max-parallel` / `DISPATCHER_MAX_PARALLEL` (never the job) |
 
 Rules:
 - **Jobs cannot weaken isolation.** `ContainerSpec` has no network, mount,
@@ -82,9 +83,10 @@ Rules:
 - Do **not** restrict the workload inside the container (no cap drops, no
   read-only rootfs, no non-root user requirement): isolation is enforced at
   the boundary, not by crippling the tool.
-- Run `sandbox-guard` before any task starts (compose `depends_on` does
-  this). Without it, tasks can reach the host. The isolation integration
-  test fails if the rules are missing.
+- The host firewall is **not** swarm's job: swarm only guarantees per-task
+  networks, no mounts and no socket. The README's "Host firewall" section is
+  the contract for callers; keep it exact when bridge naming changes. The
+  isolation integration test covers only what swarm guarantees.
 
 ## Source layout (one module per circle — the dependency rule is enforced by a test)
 
@@ -97,7 +99,7 @@ src/
 │                       job_input (JSON -> domain), NdjsonSink, report_json.
 │                       deps: application, domain, bollard, serde, tokio
 ├── lib.rs           exposes the three layers as the `swarm` library
-└── main.rs          4. composition root: `orchestrator` binary (clap, tokio).
+└── main.rs          4. composition root: `dispatcher` binary (clap, tokio).
 ```
 
 `tests/architecture.rs` scans each layer's non-test `use` declarations and
@@ -132,12 +134,12 @@ in `application`). Update its `RULES` table if you add a layer.
   report keeps only a `TailBuffer` (default 16 KiB) per stream per step.
 - Per task: create network `<bridge-prefix>-<job>-<task>-<id>` (bridge iface `<bridge-prefix><id>`) →
   create/start container on it → steps → remove container → remove network.
-- Containers and networks carry labels `<label-prefix>.orchestrator=1`,
+- Containers and networks carry labels `<label-prefix>.dispatcher=1`,
   `<label-prefix>.job=<id>`, `.task=<id>`, `.run=<per-process id>` (prefix `swarm`
   by default, `--label-prefix`). Keep it stable between runs: `cleanup` only
   finds resources carrying the prefix in use.
   On SIGINT/SIGTERM only this run's resources are removed (`remove_owned`);
-  `orchestrator cleanup <job>` reaps leftovers of every run of that job.
+  `dispatcher cleanup <job>` reaps leftovers of every run of that job.
 - One network per running task: Docker's default address pools cap this at
   ~30 (see README to raise it).
 - Defaults applied by the Docker adapter: `memory_swap = memory + swap` (swap defaults to
@@ -148,7 +150,7 @@ in `application`). Update its `RULES` table if you add a layer.
 
 - **Input:** JSON job, see `README.md` and `src/infrastructure/job_input.rs`
   (`deny_unknown_fields`). Secrets only via `env_passthrough` (names of
-  orchestrator env vars), never literal values in files.
+  dispatcher env vars), never literal values in files.
 - **Events:** NDJSON, one object per line, `event` discriminator, `ts_ms`.
 - **Report:** JSON, see `src/infrastructure/report_json.rs`.
 - **Exit codes:** 0 all ok · 1 a task failed/errored · 2 bad input ·
@@ -156,50 +158,15 @@ in `application`). Update its `RULES` table if you add a layer.
 
 Changing a wire format is a breaking change: update README and tests together.
 
-## Deployment (Docker Compose)
-
-- `Dockerfile`: multi-stage, `rust:1-slim-bookworm` build → 
-  `gcr.io/distroless/cc-debian12:nonroot` runtime (~40 MB, no shell).
-  Examples are baked in at `/examples`.
-- `compose.yaml` (standalone, or `include`d by a parent project), all under profile
-  `orchestrator` (run-to-completion): `sandbox-guard` (one-shot, host
-  network, NET_ADMIN, installs firewall rules), `orchestrator` (depends on
-  the guard having completed). Swarm ships **no task image**: runners (the
-  images tasks start from) belong to the app that embeds swarm, which also
-  adds provider-secret names to the orchestrator's `environment:` through an
-  extra compose file.
-- The orchestrator container talks to the **host** daemon through the
-  mounted socket, runs as uid 65532 with `group_add: ${DOCKER_GID}`,
-  read-only rootfs, no caps, `mem_limit: 64m`. It joins the shared
-  `${BACKEND_NETWORK:-swarm-backend}` network to reach event bus / database
-  services.
-  Task containers are siblings on the host and cannot reach that network
-  (verified by the isolation integration test).
-- Job files: `jobs/` is mounted read-only at `/jobs`. Report → stdout, events
-  → stderr (container fs is read-only; redirect on the host).
-- Naming is parameterised, never hard-coded: `IMAGE_NAMESPACE`,
-  `BACKEND_NETWORK`, `LABEL_PREFIX`, `BRIDGE_PREFIX` (see `.env.example`).
-  `LABEL_PREFIX`/`BRIDGE_PREFIX` reach the binary as
-  `ORCHESTRATOR_LABEL_PREFIX`/`ORCHESTRATOR_BRIDGE_PREFIX` and the guard as
-  `BRIDGE_PREFIX`; the guard and the orchestrator must agree on the bridge
-  prefix or the firewall matches nothing.
-- `init: true` forwards SIGTERM (`docker stop`, `compose down`) so the
-  orchestrator reaps its task containers.
-
 ## Commands
 
 ```sh
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 cargo test                                                   # unit + architecture
-sudo sandbox-guard/guard.sh apply                            # host firewall (once per boot)
-cargo test --test docker -- --ignored                        # needs Docker + guard
-cargo build --release                                        # target/release/orchestrator
-
-# via compose
-docker compose --profile orchestrator build
-docker compose --progress quiet run --rm -T orchestrator run /examples/hello.json \
-  > report.json 2> events.ndjson
+cargo test --test docker -- --ignored                        # needs Docker
+cargo build --release                                        # target/release/dispatcher
+./target/release/dispatcher run examples/hello.json > report.json 2> events.ndjson
 ```
 
 ## Conventions

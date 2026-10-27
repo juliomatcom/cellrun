@@ -1,19 +1,19 @@
 [package]
 name = "swarm"
-description = "Small orchestrator for ephemeral, isolated Docker containers that run shell steps."
+description = "Small dispatcher for ephemeral, isolated Docker containers that run shell steps."
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 publish = false
-default-run = "orchestrator"
+default-run = "dispatcher"
 
 [lib]
 name = "swarm"
 path = "src/lib.rs"
 
 [[bin]]
-name = "orchestrator"
+name = "dispatcher"
 path = "src/main.rs"
 
 # Layers live in src/{domain,application,infrastructure}; main.rs is the
