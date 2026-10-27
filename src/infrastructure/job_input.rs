@@ -314,9 +314,8 @@ mod tests {
     #[test]
     fn bundled_examples_are_valid() {
         let any_env = |_: &str| Some("x".to_owned());
-        for example in [&include_bytes!("../../examples/hello.json")[..]] {
-            parse_job(example, any_env).unwrap();
-        }
+        let example = &include_bytes!("../../examples/hello.json")[..];
+        parse_job(example, any_env).unwrap();
     }
 
     #[test]
