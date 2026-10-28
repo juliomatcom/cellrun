@@ -9,9 +9,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use swarm::application::{ContainerRuntime, EventSink, OutputLimits, RunJob};
-use swarm::domain::{Event, Job, JobId};
-use swarm::infrastructure::{
+use cellrun::application::{ContainerRuntime, EventSink, OutputLimits, RunJob};
+use cellrun::domain::{Event, Job, JobId};
+use cellrun::infrastructure::{
     DockerConfig, DockerRuntime, NdjsonSink, PullPolicy, parse_job, write_report,
 };
 
@@ -54,7 +54,7 @@ struct TaskArgs {
         long,
         global = true,
         env = "DISPATCHER_LABEL_PREFIX",
-        default_value = "swarm"
+        default_value = "cellrun"
     )]
     label_prefix: String,
     /// Prefix of task bridge interfaces (1-2 chars of [a-z0-9]). The host
@@ -63,7 +63,7 @@ struct TaskArgs {
         long,
         global = true,
         env = "DISPATCHER_BRIDGE_PREFIX",
-        default_value = "sw"
+        default_value = "cr"
     )]
     bridge_prefix: String,
 }

@@ -4,10 +4,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use swarm::application::{
+use cellrun::application::{
     ContainerRuntime, EventSink, ExecStatus, OutputLimits, OutputObserver, RunJob, RuntimeError,
 };
-use swarm::domain::{
+use cellrun::domain::{
     ContainerSpec, Event, Job, JobId, MemoryUsage, Step, StepOutcome, StreamKind, Task, TaskId,
     TaskStatus,
 };

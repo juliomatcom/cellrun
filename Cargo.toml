@@ -1,5 +1,5 @@
 [package]
-name = "swarm"
+name = "cellrun"
 description = "Small dispatcher for ephemeral, isolated Docker containers that run shell steps."
 version = "0.1.0"
 edition = "2024"
@@ -9,7 +9,7 @@ publish = false
 default-run = "dispatcher"
 
 [lib]
-name = "swarm"
+name = "cellrun"
 path = "src/lib.rs"
 
 [[bin]]

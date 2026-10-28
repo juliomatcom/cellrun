@@ -6,9 +6,9 @@
 
 use std::time::Duration;
 
-use swarm::application::{ContainerRuntime, ExecStatus, OutputObserver};
-use swarm::domain::{ContainerSpec, JobId, StreamKind, TaskId};
-use swarm::infrastructure::{DockerConfig, DockerRuntime};
+use cellrun::application::{ContainerRuntime, ExecStatus, OutputObserver};
+use cellrun::domain::{ContainerSpec, JobId, StreamKind, TaskId};
+use cellrun::infrastructure::{DockerConfig, DockerRuntime};
 
 #[derive(Default)]
 struct Collect {
@@ -96,9 +96,9 @@ async fn remove_job_reaps_labelled_containers() {
 
 // -------------------------------------------------------------- isolation --
 //
-// What swarm itself guarantees: tasks cannot reach each other or other Docker
+// What cellrun itself guarantees: tasks cannot reach each other or other Docker
 // networks, and have full access inside. Blocking the host, the LAN and cloud
-// metadata is the host firewall's job, which the user of swarm owns (README,
+// metadata is the host firewall's job, which the user of cellrun owns (README,
 // "Host firewall"); test that where the firewall is applied.
 
 use bollard::Docker;

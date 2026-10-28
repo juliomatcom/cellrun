@@ -1,8 +1,8 @@
-# AGENTS.md — swarm
+# AGENTS.md — cellrun
 
-Guidance for humans and coding agents working in this repository. Swarm is a
+Guidance for humans and coding agents working in this repository. Cellrun is a
 standalone, reusable crate: it knows nothing about the projects that use it
-(see README, "Using swarm from another project"). Keep it that way: no
+(see README, "Using cellrun from another project"). Keep it that way: no
 project names baked in; anything environment-specific is a flag or an env
 var with a neutral default.
 
@@ -10,17 +10,17 @@ var with a neutral default.
 
 ```
 .
-├── Cargo.toml / Cargo.lock  # one plain crate: lib `swarm` + bin `dispatcher`
+├── Cargo.toml / Cargo.lock  # one plain crate: lib `cellrun` + bin `dispatcher`
 ├── src/                     # all Rust code (layers below)
 ├── tests/                   # integration + architecture tests
 ├── examples/                # sample jobs
 └── .github/workflows/ci.yml
 ```
 
-Swarm is **only the engine**. No compose file, Dockerfile, images, services,
-env files or host firewall live here: projects that use swarm build the
+Cellrun is **only the engine**. No compose file, Dockerfile, images, services,
+env files or host firewall live here: projects that use cellrun build the
 binary into their own image and own their host setup (README, "Host
-firewall" and "Using swarm from another project"). Don't add them back.
+firewall" and "Using cellrun from another project"). Don't add them back.
 
 ## Architecture: Clean Architecture
 
@@ -69,7 +69,7 @@ own container: root, writable filesystem, public internet.
 | Layer | Mechanism | Where |
 |---|---|---|
 | Network: other tasks | one bridge network per task (sole member), ICC off | `docker.rs` |
-| Network: host + LAN + metadata | bridges named `<bridge-prefix><hex>` (default `sw`); a host firewall must drop `-i <prefix>+` to INPUT and to private ranges in DOCKER-USER | **the caller** (README, "Host firewall") |
+| Network: host + LAN + metadata | bridges named `<bridge-prefix><hex>` (default `cr`); a host firewall must drop `-i <prefix>+` to INPUT and to private ranges in DOCKER-USER | **the caller** (README, "Host firewall") |
 | DNS | explicit public resolvers (private ranges are dropped) | `--task-dns` |
 | Filesystem | no bind mounts, no volumes, no docker socket; anonymous volumes removed with the container | `docker.rs` |
 | Kernel (optional) | `--task-runtime runsc` (gVisor) | `--task-runtime` / `DISPATCHER_TASK_RUNTIME` |
@@ -83,10 +83,10 @@ Rules:
 - Do **not** restrict the workload inside the container (no cap drops, no
   read-only rootfs, no non-root user requirement): isolation is enforced at
   the boundary, not by crippling the tool.
-- The host firewall is **not** swarm's job: swarm only guarantees per-task
+- The host firewall is **not** cellrun's job: cellrun only guarantees per-task
   networks, no mounts and no socket. The README's "Host firewall" section is
   the contract for callers; keep it exact when bridge naming changes. The
-  isolation integration test covers only what swarm guarantees.
+  isolation integration test covers only what cellrun guarantees.
 
 ## Source layout (one module per circle — the dependency rule is enforced by a test)
 
@@ -98,7 +98,7 @@ src/
 ├── infrastructure/  3. adapters: DockerRuntime (bollard, unix socket),
 │                       job_input (JSON -> domain), NdjsonSink, report_json.
 │                       deps: application, domain, bollard, serde, tokio
-├── lib.rs           exposes the three layers as the `swarm` library
+├── lib.rs           exposes the three layers as the `cellrun` library
 └── main.rs          4. composition root: `dispatcher` binary (clap, tokio).
 ```
 
@@ -135,7 +135,7 @@ in `application`). Update its `RULES` table if you add a layer.
 - Per task: create network `<bridge-prefix>-<job>-<task>-<id>` (bridge iface `<bridge-prefix><id>`) →
   create/start container on it → steps → remove container → remove network.
 - Containers and networks carry labels `<label-prefix>.dispatcher=1`,
-  `<label-prefix>.job=<id>`, `.task=<id>`, `.run=<per-process id>` (prefix `swarm`
+  `<label-prefix>.job=<id>`, `.task=<id>`, `.run=<per-process id>` (prefix `cellrun`
   by default, `--label-prefix`). Keep it stable between runs: `cleanup` only
   finds resources carrying the prefix in use.
   On SIGINT/SIGTERM only this run's resources are removed (`remove_owned`);

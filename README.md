@@ -1,4 +1,4 @@
-# swarm
+# cellrun
 
 Tiny Docker job dispatcher: give it a JSON job, it runs each task in its own
 **ephemeral container**, executes the task's shell steps in order, streams
@@ -7,9 +7,9 @@ every output line as NDJSON, and writes a JSON report. Built for small VMs
 MiB RSS, bounded output buffers, no `docker` CLI processes (talks to the
 Engine API over `/var/run/docker.sock`).
 
-Swarm is only the engine: no compose file, images, services or firewall.
+Cellrun is only the engine: no compose file, images, services or firewall.
 Projects that use it build the binary into their own image and own the host
-setup (see "Host firewall" and "Using swarm from another project").
+setup (see "Host firewall" and "Using cellrun from another project").
 
 ## Isolation
 
@@ -17,10 +17,10 @@ Every task runs in a throwaway container. The workload inside (e.g. a coding
 agent) has full access to its own container: root, a writable filesystem and
 the public internet.
 
-**What swarm does:**
+**What cellrun does:**
 
 - **Own network per task:** each container is the only member of its own
-  bridge network (`<bridge-prefix><hex>`, `sw<hex>` by default), so tasks
+  bridge network (`<bridge-prefix><hex>`, `cr<hex>` by default), so tasks
   cannot see each other or other Docker networks.
 - **Nothing shared:** no bind mounts, no volumes and no Docker socket.
   Containers and networks are deleted when the task ends.
@@ -31,29 +31,29 @@ the public internet.
   touches the host kernel directly (install `runsc` and register it with
   Docker first: `runsc install && systemctl restart docker`).
 
-**What swarm does NOT do: the host firewall.** See below. Without it, a task
+**What cellrun does NOT do: the host firewall.** See below. Without it, a task
 can reach the host itself, your LAN and cloud metadata.
 
 ## Host firewall (your responsibility)
 
 > [!IMPORTANT]
-> Swarm does not install firewall rules and does not test them. Whoever runs
+> Cellrun does not install firewall rules and does not test them. Whoever runs
 > the dispatcher must apply them **before any task starts, after every boot**
 > (iptables rules are not persistent), and should test them on that host.
 
 Required rules, for the bridge prefix the dispatcher uses (`--bridge-prefix`,
-here `sw`; `sw+` matches every task bridge):
+here `cr`; `cr+` matches every task bridge):
 
 ```sh
 # 1. Tasks cannot reach any address of the host (bridge gateway, docker0, LAN/public IPs).
-iptables -I INPUT 1 -i sw+ -j DROP
+iptables -I INPUT 1 -i cr+ -j DROP
 # 2. Tasks cannot reach private, link-local (cloud metadata), CGNAT, multicast ranges.
-iptables -I DOCKER-USER 1 -i sw+ \
+iptables -I DOCKER-USER 1 -i cr+ \
   -d 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10,0.0.0.0/8,224.0.0.0/4,240.0.0.0/4 \
   -j DROP
 # 3. IPv6 (task networks have it disabled; defense in depth).
-ip6tables -I INPUT 1 -i sw+ -j DROP
-ip6tables -I DOCKER-USER 1 -i sw+ -j DROP
+ip6tables -I INPUT 1 -i cr+ -j DROP
+ip6tables -I DOCKER-USER 1 -i cr+ -j DROP
 ```
 
 Use the backend Docker programs (`iptables-nft` or `iptables-legacy`: the one
@@ -83,8 +83,8 @@ dispatcher cleanup <JOB_ID>          # remove leftovers of a job (ALL runs of th
 Host settings (flag / env, never from job files):
   --task-runtime  DISPATCHER_TASK_RUNTIME   OCI runtime for tasks, e.g. runsc (gVisor)
   --task-dns      DISPATCHER_TASK_DNS       public DNS for tasks (default 1.1.1.1,8.8.8.8)
-  --label-prefix  DISPATCHER_LABEL_PREFIX   labels <prefix>.dispatcher/.job/.task/.run (default swarm)
-  --bridge-prefix DISPATCHER_BRIDGE_PREFIX  task bridges <prefix><hex> (default sw; 1-2 chars [a-z0-9])
+  --label-prefix  DISPATCHER_LABEL_PREFIX   labels <prefix>.dispatcher/.job/.task/.run (default cellrun)
+  --bridge-prefix DISPATCHER_BRIDGE_PREFIX  task bridges <prefix><hex> (default cr; 1-2 chars [a-z0-9])
 ```
 
 Exit codes: `0` all tasks succeeded · `1` some task failed · `2` invalid
@@ -97,7 +97,7 @@ networks are removed; concurrent runs of the same job are not touched).
 {
   "id": "demo",                    // [A-Za-z0-9_.-], default "job"
   "defaults": {                    // any container field, inherited by tasks
-    "image": "my-org/my-runner:latest",   // any image; swarm ships none
+    "image": "my-org/my-runner:latest",   // any image; cellrun ships none
     "env": { "TZ": "UTC" },
     "env_passthrough": ["API_KEY"],  // copied from the dispatcher env
     "workdir": "/workspace",
@@ -235,7 +235,7 @@ One plain crate (`src/`), Clean Architecture modules `domain` ←
 `application` ← `infrastructure` ← `main.rs`, checked by `tests/architecture.rs`;
 see [AGENTS.md](AGENTS.md).
 
-## Using swarm from another project
+## Using cellrun from another project
 
 Add this repo as a git submodule and treat it as a black box with a CLI
 contract: job JSON in; events, report and exit code out (all above). Then:
@@ -248,7 +248,7 @@ contract: job JSON in; events, report and exit code out (all above). Then:
    the user to the socket's group. Task containers are siblings on the host.
 3. **Apply the host firewall** (see "Host firewall") before any task runs,
    after every boot, for the same `--bridge-prefix`, and test it on that
-   host. Swarm does not do this for you.
+   host. Cellrun does not do this for you.
 4. **Pick your own names:** `--label-prefix` and `--bridge-prefix` (use a
-   bridge prefix no other swarm user on the host has). `cleanup` only finds
+   bridge prefix no other cellrun user on the host has). `cleanup` only finds
    resources carrying the label prefix in use.

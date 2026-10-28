@@ -1,4 +1,4 @@
-//! Swarm: runs jobs of shell steps in ephemeral, isolated Docker containers.
+//! Cellrun: runs jobs of shell steps in ephemeral, isolated Docker containers.
 //!
 //! Clean Architecture, dependencies point inwards only:
 //! [`domain`] ← [`application`] ← [`infrastructure`] ← the `dispatcher`

@@ -4,7 +4,7 @@
 //! # Isolation
 //!
 //! Each task container is the only member of its own bridge network, whose
-//! host interface is named `<bridge_prefix><hex>` (`sw<hex>` by default), so
+//! host interface is named `<bridge_prefix><hex>` (`cr<hex>` by default), so
 //! tasks cannot see each other or other Docker networks. Containers get no
 //! mounts; inside, the workload has full (root) access. Keeping tasks off the
 //! host, the LAN and cloud metadata takes a host firewall on
@@ -96,8 +96,8 @@ impl Default for DockerConfig {
             default_pids_limit: Some(512),
             dns: vec!["1.1.1.1".to_owned(), "8.8.8.8".to_owned()],
             runtime: None,
-            label_prefix: "swarm".to_owned(),
-            bridge_prefix: "sw".to_owned(),
+            label_prefix: "cellrun".to_owned(),
+            bridge_prefix: "cr".to_owned(),
         }
     }
 }
@@ -608,12 +608,12 @@ mod tests {
         };
         assert!(validate_prefixes(&DockerConfig::default()).is_ok());
         assert!(validate_prefixes(&with("acme.app", "hp")).is_ok());
-        assert!(validate_prefixes(&with("swarm", "")).is_err());
+        assert!(validate_prefixes(&with("cellrun", "")).is_err());
         assert!(
-            validate_prefixes(&with("swarm", "abc")).is_err(),
+            validate_prefixes(&with("cellrun", "abc")).is_err(),
             "too long for IFNAMSIZ"
         );
-        assert!(validate_prefixes(&with("swarm", "H")).is_err());
-        assert!(validate_prefixes(&with("", "sw")).is_err());
+        assert!(validate_prefixes(&with("cellrun", "H")).is_err());
+        assert!(validate_prefixes(&with("", "cr")).is_err());
     }
 }
