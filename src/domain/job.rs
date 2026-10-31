@@ -95,6 +95,9 @@ pub struct Step {
     pub timeout: Duration,
     /// When `true`, a failure of this step does not stop the task.
     pub continue_on_error: bool,
+    /// Text piped to the step's process, then closed. Never logged, emitted
+    /// in events or written to reports.
+    pub stdin: Option<String>,
 }
 
 impl Step {
@@ -115,6 +118,7 @@ impl Step {
             run,
             timeout,
             continue_on_error: false,
+            stdin: None,
         })
     }
 }

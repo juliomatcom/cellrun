@@ -49,10 +49,13 @@ pub trait ContainerRuntime: Send + Sync {
 
     /// Runs `command` through a shell inside the container, streaming output
     /// to `observer`. Must return [`ExecStatus::TimedOut`] after `timeout`.
+    /// When `input` is `Some`, those bytes are piped to the command's stdin
+    /// and stdin is then closed (EOF); writing counts against `timeout`.
     fn exec(
         &self,
         container_id: &str,
         command: &str,
+        input: Option<&[u8]>,
         timeout: Duration,
         observer: &mut dyn OutputObserver,
     ) -> impl Future<Output = Result<ExecStatus, RuntimeError>> + Send;
@@ -102,10 +105,11 @@ impl<T: ContainerRuntime + ?Sized> ContainerRuntime for &T {
         &self,
         container_id: &str,
         command: &str,
+        input: Option<&[u8]>,
         timeout: Duration,
         observer: &mut dyn OutputObserver,
     ) -> impl Future<Output = Result<ExecStatus, RuntimeError>> + Send {
-        (**self).exec(container_id, command, timeout, observer)
+        (**self).exec(container_id, command, input, timeout, observer)
     }
 
     fn memory_usage(

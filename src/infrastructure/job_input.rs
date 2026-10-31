@@ -93,6 +93,8 @@ enum StepDto {
         timeout_secs: Option<u64>,
         #[serde(default)]
         continue_on_error: bool,
+        /// Text piped to the step's process, then closed.
+        stdin: Option<String>,
     },
 }
 
@@ -212,19 +214,21 @@ fn to_task(
         .into_iter()
         .enumerate()
         .map(|(i, step)| {
-            let (name, run, timeout, continue_on_error) = match step {
-                StepDto::Command(run) => (None, run, None, false),
+            let (name, run, timeout, continue_on_error, stdin) = match step {
+                StepDto::Command(run) => (None, run, None, false, None),
                 StepDto::Full {
                     name,
                     run,
                     timeout_secs,
                     continue_on_error,
-                } => (name, run, timeout_secs, continue_on_error),
+                    stdin,
+                } => (name, run, timeout_secs, continue_on_error, stdin),
             };
             let secs = timeout.or(task_timeout).unwrap_or(DEFAULT_TIMEOUT_SECS);
             let name = name.unwrap_or_else(|| format!("step-{i}"));
             let mut step = Step::new(name, run, Duration::from_secs(secs)).map_err(invalid)?;
             step.continue_on_error = continue_on_error;
+            step.stdin = stdin;
             Ok(step)
         })
         .collect::<Result<Vec<_>, InputError>>()?;
@@ -256,6 +260,31 @@ mod tests {
         assert_eq!(step.name, "step-0");
         assert_eq!(step.run, "echo hi");
         assert_eq!(step.timeout, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn step_stdin_is_optional() {
+        let job = parse_job(
+            br#"{"tasks":[{"id":"t","image":"x","steps":[
+                "ls",
+                {"run":"cat","stdin":"hello\nworld"},
+                {"run":"cat"}]}]}"#,
+            env,
+        )
+        .unwrap();
+        let steps = &job.tasks[0].steps;
+        assert_eq!(steps[0].stdin, None);
+        assert_eq!(steps[1].stdin.as_deref(), Some("hello\nworld"));
+        assert_eq!(steps[2].stdin, None);
+    }
+
+    #[test]
+    fn step_stdin_must_be_a_string_and_task_typos_still_fail() {
+        let json =
+            br#"{"tasks":[{"id":"t","image":"x","typo":1,"steps":[{"run":"cat","stdin":"a"}]}]}"#;
+        assert!(parse_job(json, env).is_err());
+        let json = br#"{"tasks":[{"id":"t","image":"x","steps":[{"run":"cat","stdin":5}]}]}"#;
+        assert!(parse_job(json, env).is_err());
     }
 
     #[test]

@@ -75,6 +75,7 @@ impl ContainerRuntime for FakeRuntime {
         &self,
         container_id: &str,
         command: &str,
+        _: Option<&[u8]>,
         _: Duration,
         observer: &mut dyn OutputObserver,
     ) -> Result<ExecStatus, RuntimeError> {

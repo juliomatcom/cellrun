@@ -116,12 +116,18 @@ networks are removed; concurrent runs of the same job are not touched).
       "steps": [
         "echo plain string steps are fine",
         { "name": "build", "run": "make all",
-          "timeout_secs": 900, "continue_on_error": false }
+          "timeout_secs": 900, "continue_on_error": false,
+          "stdin": "optional text piped to the step" }
       ]
     }
   ]
 }
 ```
+
+`stdin` (object-form steps only) is piped to the step's `sh -c` and then
+closed, so the process sees EOF. It suits large or sensitive inputs that do
+not fit environment-variable limits. It counts against the step timeout and is
+never written to events or reports.
 
 Steps run with `/bin/sh -c` in the same container, so files persist between
 steps of a task. A failing step (non-zero exit, runtime error) skips the rest

@@ -127,7 +127,13 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
                 let mut capture = StepCapture::new(&self.sink, &task.id, index, self.limits);
                 let outcome = match self
                     .runtime
-                    .exec(&container_id, &step.run, step.timeout, &mut capture)
+                    .exec(
+                        &container_id,
+                        &step.run,
+                        step.stdin.as_deref().map(str::as_bytes),
+                        step.timeout,
+                        &mut capture,
+                    )
                     .await
                 {
                     Ok(ExecStatus::Exited(0)) => StepOutcome::Succeeded,

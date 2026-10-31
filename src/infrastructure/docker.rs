@@ -26,6 +26,7 @@ use bollard::query_parameters::{
     ListNetworksOptionsBuilder, RemoveContainerOptionsBuilder,
 };
 use futures_util::{StreamExt, TryStreamExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::application::{ContainerRuntime, ExecStatus, OutputObserver, RuntimeError};
 use crate::domain::{ContainerSpec, JobId, MemoryUsage, StreamKind, TaskId};
@@ -306,6 +307,7 @@ impl ContainerRuntime for DockerRuntime {
         &self,
         container_id: &str,
         command: &str,
+        input: Option<&[u8]>,
         timeout: Duration,
         observer: &mut dyn OutputObserver,
     ) -> Result<ExecStatus, RuntimeError> {
@@ -315,6 +317,7 @@ impl ContainerRuntime for DockerRuntime {
                 container_id,
                 CreateExecOptions {
                     cmd: Some(vec!["/bin/sh", "-c", command]),
+                    attach_stdin: input.map(|_| true),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     ..Default::default()
@@ -324,23 +327,39 @@ impl ContainerRuntime for DockerRuntime {
             .map_err(err)?;
 
         let run = async {
-            let StartExecResults::Attached { mut output, .. } =
-                self.docker.start_exec(&exec.id, None).await.map_err(err)?
+            let StartExecResults::Attached {
+                mut output,
+                input: mut stdin,
+            } = self.docker.start_exec(&exec.id, None).await.map_err(err)?
             else {
                 return Err(RuntimeError::new("exec started detached"));
             };
-            while let Some(frame) = output.next().await {
-                match frame.map_err(err)? {
-                    LogOutput::StdOut { message } | LogOutput::Console { message } => {
-                        observer.on_output(StreamKind::Stdout, &message)
-                    }
-                    LogOutput::StdErr { message } => {
-                        observer.on_output(StreamKind::Stderr, &message)
-                    }
-                    LogOutput::StdIn { .. } => {}
+            // Write and read concurrently: a large input would otherwise
+            // deadlock against a process that fills its output pipe first.
+            let write = async {
+                if let Some(bytes) = input {
+                    // A process that exits without reading all of its stdin
+                    // closes the pipe; that is not an error of the step.
+                    let _ = stdin.write_all(bytes).await;
+                    let _ = stdin.shutdown().await;
                 }
-            }
-            Ok(())
+            };
+            let read = async {
+                while let Some(frame) = output.next().await {
+                    match frame.map_err(err)? {
+                        LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                            observer.on_output(StreamKind::Stdout, &message)
+                        }
+                        LogOutput::StdErr { message } => {
+                            observer.on_output(StreamKind::Stderr, &message)
+                        }
+                        LogOutput::StdIn { .. } => {}
+                    }
+                }
+                Ok(())
+            };
+            let ((), result) = tokio::join!(write, read);
+            result
         };
         // On timeout the process keeps running inside the container; the task
         // halts and the whole container is removed, which kills it.
@@ -368,7 +387,13 @@ impl ContainerRuntime for DockerRuntime {
     async fn memory_usage(&self, container_id: &str) -> Result<MemoryUsage, RuntimeError> {
         let mut out = Collect::default();
         match self
-            .exec(container_id, READ_MEMORY, Duration::from_secs(5), &mut out)
+            .exec(
+                container_id,
+                READ_MEMORY,
+                None,
+                Duration::from_secs(5),
+                &mut out,
+            )
             .await?
         {
             ExecStatus::Exited(0) => Ok(parse_memory(&String::from_utf8_lossy(&out.0))),
