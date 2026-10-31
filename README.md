@@ -76,6 +76,7 @@ API_KEY=... ./target/release/dispatcher run my-job.json \
 ```
 dispatcher run <JOB|-> [--events <PATH|->] [--report <PATH|->]
                        [--pull missing|always|never] [--tail-bytes N]
+                       [--max-line-bytes N]  # env DISPATCHER_MAX_LINE_BYTES, default 8192
                        [--max-parallel N]   # env DISPATCHER_MAX_PARALLEL, default 2
 dispatcher validate <JOB|->
 dispatcher cleanup <JOB_ID>          # remove leftovers of a job (ALL runs of that id)
@@ -178,6 +179,11 @@ Task `status`: `succeeded`, `failed`, `error` (+`error`, e.g. image pull failed)
   }]
 }
 ```
+
+An `output` event carries at most `--max-line-bytes` (default 8 KiB) of one
+line; longer lines arrive as consecutive events of that size. Raise it when a
+task prints a large single-line result (e.g. JSON) that you parse from the
+events stream.
 
 `*_tail` holds the last `--tail-bytes` (default 16 KiB) of each stream;
 `*_bytes` is the full size. The complete output is in the events stream.
