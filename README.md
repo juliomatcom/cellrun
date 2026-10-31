@@ -80,6 +80,7 @@ dispatcher run <JOB|-> [--events <PATH|->] [--report <PATH|->]
                        [--max-parallel N]   # env DISPATCHER_MAX_PARALLEL, default 2
 dispatcher validate <JOB|->
 dispatcher cleanup <JOB_ID>          # remove leftovers of a job (ALL runs of that id)
+dispatcher cleanup --all             # remove leftovers of every job with this label prefix
 
 Host settings (flag / env, never from job files):
   --task-runtime  DISPATCHER_TASK_RUNTIME   OCI runtime for tasks, e.g. runsc (gVisor)

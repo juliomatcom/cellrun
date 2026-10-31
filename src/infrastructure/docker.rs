@@ -399,6 +399,14 @@ impl ContainerRuntime for DockerRuntime {
 }
 
 impl DockerRuntime {
+    /// Removes every container and network carrying this dispatcher's label
+    /// prefix, whatever job or run created them (e.g. after a caller crashed
+    /// and lost track of its job ids).
+    pub async fn remove_all(&self) -> Result<usize, RuntimeError> {
+        self.remove_labelled(format!("{}=1", self.labels.managed))
+            .await
+    }
+
     /// Removes managed containers, then networks, matching `label`.
     async fn remove_labelled(&self, label: String) -> Result<usize, RuntimeError> {
         let filters = HashMap::from([("label", vec![format!("{}=1", self.labels.managed), label])]);
