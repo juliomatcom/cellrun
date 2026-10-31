@@ -94,6 +94,31 @@ async fn remove_job_reaps_labelled_containers() {
     assert_eq!(runtime.remove_job(&job).await.unwrap(), 0);
 }
 
+#[tokio::test]
+#[ignore = "requires a Docker daemon"]
+async fn remove_all_reaps_every_job_with_the_label_prefix() {
+    let config = || DockerConfig {
+        label_prefix: "it-all".into(),
+        ..DockerConfig::default()
+    };
+    let runtime = DockerRuntime::connect(config()).unwrap();
+    let other = DockerRuntime::connect(DockerConfig::default()).unwrap();
+    let spec = ContainerSpec::new(image()).unwrap();
+    let task = TaskId::new("t").unwrap();
+    for job in ["it-all-a", "it-all-b"] {
+        runtime
+            .start(&JobId::new(job).unwrap(), &task, &spec)
+            .await
+            .unwrap();
+    }
+    let spared = JobId::new("it-all-other-prefix").unwrap();
+    other.start(&spared, &task, &spec).await.unwrap();
+
+    assert_eq!(runtime.remove_all().await.unwrap(), 2);
+    assert_eq!(runtime.remove_all().await.unwrap(), 0);
+    assert_eq!(other.remove_job(&spared).await.unwrap(), 1);
+}
+
 // -------------------------------------------------------------- isolation --
 //
 // What cellrun itself guarantees: tasks cannot reach each other or other Docker

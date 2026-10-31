@@ -118,7 +118,11 @@ enum Command {
     /// Remove leftover containers of a job (e.g. after a crash).
     Cleanup {
         /// Job id.
-        job_id: String,
+        #[arg(required_unless_present = "all")]
+        job_id: Option<String>,
+        /// Remove leftovers of every job carrying the label prefix instead.
+        #[arg(long, conflicts_with = "job_id")]
+        all: bool,
     },
 }
 
@@ -168,8 +172,12 @@ async fn main() -> ExitCode {
             }
             Err(code) => code,
         },
-        Command::Cleanup { job_id } => {
-            cleanup(&job_id, cli.task.docker_config(PullPolicy::Never)).await
+        Command::Cleanup { job_id, all } => {
+            let config = cli.task.docker_config(PullPolicy::Never);
+            match job_id {
+                Some(job_id) if !all => cleanup(&job_id, config).await,
+                _ => cleanup_all(config).await,
+            }
         }
     }
 }
@@ -240,6 +248,20 @@ async fn cleanup(job_id: &str, config: DockerConfig) -> ExitCode {
         Err(code) => return code,
     };
     match runtime.remove_job(&job_id).await {
+        Ok(n) => {
+            println!("removed {n} container(s)");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(EXIT_RUNTIME, e),
+    }
+}
+
+async fn cleanup_all(config: DockerConfig) -> ExitCode {
+    let runtime = match connect(config).await {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    match runtime.remove_all().await {
         Ok(n) => {
             println!("removed {n} container(s)");
             ExitCode::SUCCESS
