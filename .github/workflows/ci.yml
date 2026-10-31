@@ -20,6 +20,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked
       - run: cargo test --locked
+      - run: start-dockerd
       - run: docker pull debian:bookworm-slim
       - run: cargo test --locked --test docker -- --ignored
 
