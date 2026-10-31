@@ -392,3 +392,34 @@ async fn report_output_is_bounded_by_limits() {
     assert_eq!(s.stdout_tail, "hij\n");
     assert_eq!(s.stdout_bytes, 22);
 }
+
+#[tokio::test]
+async fn lines_longer_than_max_line_bytes_are_split() {
+    let runtime = FakeRuntime::with(&[("long", Script::ok(&["0123456789\n"]))]);
+    let sink = RecordingSink::default();
+    let limits = OutputLimits {
+        tail_bytes: 64,
+        max_line_bytes: 4,
+    };
+
+    RunJob::new(&runtime, &sink, limits, parallel(1))
+        .execute(&job(vec![task("t", vec![step("long")])]))
+        .await;
+
+    let lines: Vec<String> = sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.starts_with("out "))
+        .cloned()
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "out t#0 Stdout 0123",
+            "out t#0 Stdout 4567",
+            "out t#0 Stdout 89"
+        ]
+    );
+}
