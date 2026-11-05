@@ -130,7 +130,7 @@ in `application`). Update its `RULES` table if you add a layer.
   `continue_on_error`. A timeout always halts and fails the task
   (`StepOutcome::halts_task`): Docker cannot kill an exec'd process, so the
   container is removed instead, which kills it.
-- Streamed stdin (`stdin_stream` steps): `--control <PATH>` NDJSON lines go
+- Streamed stdin (`stdin_stream` steps): `--control <PATH|->` (`-` = stdin; the job must then be a file) NDJSON lines go
   through `application::ControlRouter` into one bounded queue per task
   (`try_send`, never blocks); control EOF closes every stream. Lines are
   secrets: warnings name the task, never the line.

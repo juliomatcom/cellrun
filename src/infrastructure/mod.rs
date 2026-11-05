@@ -9,7 +9,7 @@ pub mod job_input;
 pub mod ndjson_sink;
 pub mod report_json;
 
-pub use control_input::{ControlReader, open_control};
+pub use control_input::{BoxedInput, ControlReader, open_control};
 pub use docker::{DockerConfig, DockerRuntime, PullPolicy};
 pub use job_input::{InputError, parse_job};
 pub use ndjson_sink::NdjsonSink;

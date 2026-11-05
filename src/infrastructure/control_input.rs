@@ -21,14 +21,21 @@ struct ControlDto {
     line: String,
 }
 
-/// Opens the control input at `path` (a pipe such as `/dev/fd/3`, or a FIFO).
-/// Opening never blocks, whether or not a writer is connected yet.
-pub fn open_control(path: &Path) -> io::Result<ControlReader<BufReader<pipe::Receiver>>> {
-    let receiver = pipe::OpenOptions::new().open_receiver(path)?;
-    Ok(ControlReader::new(BufReader::with_capacity(
-        8 * 1024,
-        receiver,
-    )))
+/// The control input as any buffered async reader.
+pub type BoxedInput = Box<dyn AsyncBufRead + Unpin>;
+
+/// Opens the control input: `-` is the process's own stdin (any fd type: pipe,
+/// socketpair, tty, file), otherwise `path` must be a pipe such as
+/// `/dev/fd/3`, or a FIFO. Opening never blocks, whether or not a writer is
+/// connected yet.
+pub fn open_control(path: &Path) -> io::Result<ControlReader<BoxedInput>> {
+    let input: BoxedInput = if path == Path::new("-") {
+        Box::new(BufReader::with_capacity(8 * 1024, tokio::io::stdin()))
+    } else {
+        let receiver = pipe::OpenOptions::new().open_receiver(path)?;
+        Box::new(BufReader::with_capacity(8 * 1024, receiver))
+    };
+    Ok(ControlReader::new(input))
 }
 
 /// Splits a byte stream into control messages, holding at most
@@ -133,6 +140,28 @@ mod tests {
             read_all(&input).await,
             [ControlMessage::Oversized, line("a", "ok")]
         );
+    }
+
+    #[tokio::test]
+    async fn eof_closes_every_stream_like_the_router_expects() {
+        use crate::application::{ControlRouter, EventSink};
+        use crate::domain::{Event, TaskId};
+        use futures_util::StreamExt;
+
+        struct Quiet;
+        impl EventSink for Quiet {
+            fn emit(&self, _: &Event<'_>) {}
+        }
+
+        let router = ControlRouter::new();
+        let mut rx = router.open(&TaskId::new("a").unwrap());
+        let mut reader = ControlReader::new(&b"{\"task\":\"a\",\"line\":\"x\"}\n"[..]);
+        while let Some(m) = reader.next_message().await.unwrap() {
+            router.handle(&Quiet, m);
+        }
+        router.close_all();
+        assert_eq!(rx.next().await, Some(b"x\n".to_vec()));
+        assert_eq!(rx.next().await, None);
     }
 
     #[tokio::test]

@@ -360,3 +360,51 @@ async fn remove_owned_spares_concurrent_runs_of_the_same_job() {
     assert_eq!(status, ExecStatus::Exited(0));
     assert_eq!(run_b.remove_owned().await.unwrap(), 1);
 }
+
+/// Real binary: job from a file, control lines on stdin (`--control -`),
+/// `cat` echoes them and stdin EOF ends the step.
+#[test]
+#[ignore = "requires a Docker daemon"]
+fn dispatcher_streams_control_lines_from_stdin() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = std::env::temp_dir().join(format!("cellrun-ctl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let job = dir.join("job.json");
+    let events = dir.join("events.ndjson");
+    let body = format!(
+        r#"{{"id":"it-ctl","tasks":[{{"id":"a","image":"{}","steps":[
+            {{"run":"cat","stdin":"init\n","stdin_stream":true,"timeout_secs":60}}]}}]}}"#,
+        image()
+    );
+    std::fs::write(&job, body).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dispatcher"))
+        .args(["run"])
+        .arg(&job)
+        .args(["--control", "-", "--events"])
+        .arg(&events)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    for text in ["one", "two"] {
+        writeln!(stdin, r#"{{"task":"a","line":"{text}"}}"#).unwrap();
+        stdin.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    drop(stdin); // EOF: the step ends
+    let out = child.wait_with_output().unwrap();
+    let log = std::fs::read_to_string(&events).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    assert!(out.status.success(), "{log}");
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        report.contains(r#""stdout_tail": "init\none\ntwo\n""#),
+        "{report}"
+    );
+}

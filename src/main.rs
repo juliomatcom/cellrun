@@ -112,7 +112,8 @@ enum Command {
         max_parallel: NonZeroUsize,
         /// Control input for `stdin_stream` steps: NDJSON lines
         /// `{"task":"<id>","line":"<text>"}` read from this pipe/FIFO (e.g.
-        /// `/dev/fd/3`). Closing it sends EOF to every streamed stdin.
+        /// `/dev/fd/3`), or from stdin with `-` (then the job must be a
+        /// file). Closing it sends EOF to every streamed stdin.
         #[arg(long, value_name = "PATH")]
         control: Option<PathBuf>,
     },
@@ -151,8 +152,22 @@ impl From<Pull> for PullPolicy {
 
 // Single-threaded runtime: the work is I/O bound and this keeps the memory
 // footprint minimal on small VMs.
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => return fail(EXIT_RUNTIME, format_args!("cannot start runtime: {e}")),
+    };
+    let code = runtime.block_on(run_cli());
+    // Do not wait for a blocking read of `--control -` that is still parked
+    // on a stdin the caller keeps open after the job ended.
+    runtime.shutdown_background();
+    code
+}
+
+async fn run_cli() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Run {
@@ -207,6 +222,12 @@ async fn run(
     max_parallel: NonZeroUsize,
     control: Option<&Path>,
 ) -> ExitCode {
+    if control == Some(Path::new("-")) && job == Path::new("-") {
+        return fail(
+            EXIT_BAD_INPUT,
+            "`--control -` reads stdin, so the job must be a file path, not `-`",
+        );
+    }
     let job = match load_job(job) {
         Ok(job) => job,
         Err(code) => return code,

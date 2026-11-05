@@ -78,7 +78,7 @@ dispatcher run <JOB|-> [--events <PATH|->] [--report <PATH|->]
                        [--pull missing|always|never] [--tail-bytes N]
                        [--max-line-bytes N]  # env DISPATCHER_MAX_LINE_BYTES, default 8192
                        [--max-parallel N]   # env DISPATCHER_MAX_PARALLEL, default 2
-                       [--control <PATH>]   # NDJSON input for `stdin_stream` steps, default none
+                       [--control <PATH|->] # NDJSON input for `stdin_stream` steps (- = stdin), default none
 dispatcher validate <JOB|->
 dispatcher cleanup <JOB_ID>          # remove leftovers of a job (ALL runs of that id)
 dispatcher cleanup --all             # remove leftovers of every job with this label prefix
@@ -139,7 +139,7 @@ runs (an interactive or long-lived process). Plain string steps cannot stream.
 The step ends when the process exits, when `timeout_secs` elapses, or when the
 control input closes (the process then sees EOF and normally exits).
 
-Lines come in on the dispatcher's **control input**, `--control <PATH>`
+Lines come in on the dispatcher's **control input**, `--control <PATH|->`
 (default none): NDJSON, one object per line.
 
 ```
@@ -147,11 +147,21 @@ Lines come in on the dispatcher's **control input**, `--control <PATH>`
 ```
 
 The dispatcher appends `\n` and writes `line` to the stdin of that task's
-currently running streamed step. The path must be a pipe or FIFO, so the job
-can still arrive on stdin: `dispatcher run - --control /dev/fd/3`, with the
-pipe passed as fd 3 (shell `3<`, Python `pass_fds`). Node's `stdio: 'pipe'`
-is a socket pair, which `/dev/fd/N` cannot reopen on Linux; create a FIFO
-(`mkfifo`), open it read-write and pass its path instead.
+currently running streamed step.
+
+Where the control input comes from:
+
+- `--control -` (recommended for callers that cannot pass extra pipes, such as
+  Node): read it from the dispatcher's own stdin. Any fd type works (pipe,
+  socketpair, tty). stdin is then taken, so the job must be a file path:
+  `dispatcher run job.json --control -` (`run - --control -` is a usage error,
+  exit 2). Closing the caller's end of stdin is the EOF.
+- `--control <PATH>`: a pipe or FIFO, so the job can still arrive on stdin:
+  `dispatcher run - --control /dev/fd/3`, with the pipe passed as fd 3 (shell
+  `3<`, Python `pass_fds`). Node's `stdio: 'pipe'` is a socket pair, which
+  `/dev/fd/N` cannot reopen on Linux. Alternatively `mkfifo` a path and open
+  it read-write. Caveat: on macOS a FIFO does not report EOF when the writer
+  closes (anonymous pipes do); Linux is fine.
 
 - Closing the control input (EOF) sends EOF to every streamed stdin, and any
   streamed step that starts later gets EOF right after its initial `stdin`:
