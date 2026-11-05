@@ -9,10 +9,11 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use cellrun::application::{ContainerRuntime, EventSink, OutputLimits, RunJob};
+use cellrun::application::{ContainerRuntime, ControlRouter, EventSink, OutputLimits, RunJob};
 use cellrun::domain::{Event, Job, JobId};
 use cellrun::infrastructure::{
-    DockerConfig, DockerRuntime, NdjsonSink, PullPolicy, parse_job, write_report,
+    ControlReader, DockerConfig, DockerRuntime, NdjsonSink, PullPolicy, open_control, parse_job,
+    write_report,
 };
 
 const EXIT_TASK_FAILED: u8 = 1;
@@ -109,6 +110,11 @@ enum Command {
         /// and never by the job: budget `max_parallel × memory_mb` of RAM.
         #[arg(long, env = "DISPATCHER_MAX_PARALLEL", default_value = "2")]
         max_parallel: NonZeroUsize,
+        /// Control input for `stdin_stream` steps: NDJSON lines
+        /// `{"task":"<id>","line":"<text>"}` read from this pipe/FIFO (e.g.
+        /// `/dev/fd/3`). Closing it sends EOF to every streamed stdin.
+        #[arg(long, value_name = "PATH")]
+        control: Option<PathBuf>,
     },
     /// Validate a job file without running anything.
     Validate {
@@ -157,13 +163,23 @@ async fn main() -> ExitCode {
             tail_bytes,
             max_line_bytes,
             max_parallel,
+            control,
         } => {
             let config = cli.task.docker_config(pull.into());
             let limits = OutputLimits {
                 tail_bytes,
                 max_line_bytes: max_line_bytes.get(),
             };
-            run(&job, &events, &report, config, limits, max_parallel).await
+            run(
+                &job,
+                &events,
+                &report,
+                config,
+                limits,
+                max_parallel,
+                control.as_deref(),
+            )
+            .await
         }
         Command::Validate { job } => match load_job(&job) {
             Ok(job) => {
@@ -189,10 +205,20 @@ async fn run(
     config: DockerConfig,
     limits: OutputLimits,
     max_parallel: NonZeroUsize,
+    control: Option<&Path>,
 ) -> ExitCode {
     let job = match load_job(job) {
         Ok(job) => job,
         Err(code) => return code,
+    };
+    let control = match control.map(open_control).transpose() {
+        Ok(reader) => reader,
+        Err(e) => {
+            return fail(
+                EXIT_BAD_INPUT,
+                format_args!("cannot open control input: {e}"),
+            );
+        }
     };
     let runtime = match connect(config).await {
         Ok(rt) => rt,
@@ -207,10 +233,23 @@ async fn run(
             );
         }
     };
-    let use_case = RunJob::new(&runtime, &sink, limits, max_parallel);
+    let router = ControlRouter::new();
+    let mut use_case = RunJob::new(&runtime, &sink, limits, max_parallel);
+    if control.is_some() {
+        use_case = use_case.with_control(router.clone());
+    }
 
+    // The control pump never completes: it is a select branch, so it is
+    // dropped (and nothing keeps the process alive) once the job is done.
+    let pump = async {
+        match control {
+            Some(reader) => match pump_control(reader, &router, &sink).await {},
+            None => std::future::pending().await,
+        }
+    };
     let result = tokio::select! {
         report = use_case.execute(&job) => report,
+        never = pump => match never {},
         () = shutdown_signal() => {
             // Dropping `execute` abandons in-flight work; reap its containers.
             sink.emit(&Event::Warning { task: None, message: "interrupted, removing containers" });
@@ -236,6 +275,34 @@ async fn run(
     } else {
         ExitCode::from(EXIT_TASK_FAILED)
     }
+}
+
+/// Routes control lines to their tasks until the input closes, then sends EOF
+/// to every streamed stdin and idles (the job decides when the run ends).
+async fn pump_control<R, S>(
+    mut reader: ControlReader<R>,
+    router: &ControlRouter,
+    sink: &S,
+) -> std::convert::Infallible
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    S: EventSink,
+{
+    loop {
+        match reader.next_message().await {
+            Ok(Some(message)) => router.handle(sink, message),
+            Ok(None) => break,
+            Err(e) => {
+                sink.emit(&Event::Warning {
+                    task: None,
+                    message: &format!("control input failed: {e}"),
+                });
+                break;
+            }
+        }
+    }
+    router.close_all();
+    std::future::pending().await
 }
 
 async fn cleanup(job_id: &str, config: DockerConfig) -> ExitCode {

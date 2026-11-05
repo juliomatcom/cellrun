@@ -2,6 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
+use crate::application::control::InputReceiver;
 use crate::domain::{ContainerSpec, Event, JobId, MemoryUsage, StreamKind, TaskId};
 
 /// Error reported by a [`ContainerRuntime`] implementation.
@@ -51,11 +52,16 @@ pub trait ContainerRuntime: Send + Sync {
     /// to `observer`. Must return [`ExecStatus::TimedOut`] after `timeout`.
     /// When `input` is `Some`, those bytes are piped to the command's stdin
     /// and stdin is then closed (EOF); writing counts against `timeout`.
+    /// When `stream` is `Some`, stdin stays open after `input` and every chunk
+    /// the stream yields is written to it; stdin is closed (EOF) once the
+    /// stream ends. The call returns when the process exits (the stream is
+    /// then dropped), on timeout, or on error, whichever comes first.
     fn exec(
         &self,
         container_id: &str,
         command: &str,
         input: Option<&[u8]>,
+        stream: Option<InputReceiver>,
         timeout: Duration,
         observer: &mut dyn OutputObserver,
     ) -> impl Future<Output = Result<ExecStatus, RuntimeError>> + Send;
@@ -106,10 +112,11 @@ impl<T: ContainerRuntime + ?Sized> ContainerRuntime for &T {
         container_id: &str,
         command: &str,
         input: Option<&[u8]>,
+        stream: Option<InputReceiver>,
         timeout: Duration,
         observer: &mut dyn OutputObserver,
     ) -> impl Future<Output = Result<ExecStatus, RuntimeError>> + Send {
-        (**self).exec(container_id, command, input, timeout, observer)
+        (**self).exec(container_id, command, input, stream, timeout, observer)
     }
 
     fn memory_usage(

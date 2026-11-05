@@ -78,6 +78,7 @@ dispatcher run <JOB|-> [--events <PATH|->] [--report <PATH|->]
                        [--pull missing|always|never] [--tail-bytes N]
                        [--max-line-bytes N]  # env DISPATCHER_MAX_LINE_BYTES, default 8192
                        [--max-parallel N]   # env DISPATCHER_MAX_PARALLEL, default 2
+                       [--control <PATH>]   # NDJSON input for `stdin_stream` steps, default none
 dispatcher validate <JOB|->
 dispatcher cleanup <JOB_ID>          # remove leftovers of a job (ALL runs of that id)
 dispatcher cleanup --all             # remove leftovers of every job with this label prefix
@@ -117,7 +118,8 @@ networks are removed; concurrent runs of the same job are not touched).
         "echo plain string steps are fine",
         { "name": "build", "run": "make all",
           "timeout_secs": 900, "continue_on_error": false,
-          "stdin": "optional text piped to the step" }
+          "stdin": "optional text piped to the step",
+          "stdin_stream": false }
       ]
     }
   ]
@@ -128,6 +130,41 @@ networks are removed; concurrent runs of the same job are not touched).
 closed, so the process sees EOF. It suits large or sensitive inputs that do
 not fit environment-variable limits. It counts against the step timeout and is
 never written to events or reports.
+
+### Streamed stdin
+
+An object-form step with `"stdin_stream": true` keeps the process's stdin open
+after the optional `stdin` text, so a caller can feed it more lines while it
+runs (an interactive or long-lived process). Plain string steps cannot stream.
+The step ends when the process exits, when `timeout_secs` elapses, or when the
+control input closes (the process then sees EOF and normally exits).
+
+Lines come in on the dispatcher's **control input**, `--control <PATH>`
+(default none): NDJSON, one object per line.
+
+```
+{"task":"<task id>","line":"<text>"}
+```
+
+The dispatcher appends `\n` and writes `line` to the stdin of that task's
+currently running streamed step. The path must be a pipe or FIFO, so the job
+can still arrive on stdin: `dispatcher run - --control /dev/fd/3`, with the
+pipe passed as fd 3 (shell `3<`, Python `pass_fds`). Node's `stdio: 'pipe'`
+is a socket pair, which `/dev/fd/N` cannot reopen on Linux; create a FIFO
+(`mkfifo`), open it read-write and pass its path instead.
+
+- Closing the control input (EOF) sends EOF to every streamed stdin, and any
+  streamed step that starts later gets EOF right after its initial `stdin`:
+  this is the clean "stop". Without `--control`, streamed steps get EOF right
+  after `stdin` too.
+- Bounds: a control line (the whole JSON object) is at most 64 KiB; each task
+  queues at most 256 pending lines. A longer line, a full queue, invalid
+  JSON, or a line for a task that is unknown, finished or not streaming is
+  dropped with a `warning` event naming the task (when valid), never the line.
+  A slow reader never blocks other tasks or the control reader; time spent
+  writing counts against the step timeout.
+- Control lines are never written to events, reports or logs, like `stdin`.
+  Output is unchanged: no new event types.
 
 Steps run with `/bin/sh -c` in the same container, so files persist between
 steps of a task. A failing step (non-zero exit, runtime error) skips the rest

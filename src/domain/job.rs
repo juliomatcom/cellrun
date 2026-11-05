@@ -95,9 +95,12 @@ pub struct Step {
     pub timeout: Duration,
     /// When `true`, a failure of this step does not stop the task.
     pub continue_on_error: bool,
-    /// Text piped to the step's process, then closed. Never logged, emitted
+    /// Text piped to the step's process, then closed (unless `stdin_stream`). Never logged, emitted
     /// in events or written to reports.
     pub stdin: Option<String>,
+    /// Keep the process's stdin open after `stdin`, fed by the control input
+    /// until it closes. Control lines are never logged either.
+    pub stdin_stream: bool,
 }
 
 impl Step {
@@ -119,6 +122,7 @@ impl Step {
             timeout,
             continue_on_error: false,
             stdin: None,
+            stdin_stream: false,
         })
     }
 }

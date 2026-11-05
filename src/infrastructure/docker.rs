@@ -28,7 +28,9 @@ use bollard::query_parameters::{
 use futures_util::{StreamExt, TryStreamExt};
 use tokio::io::AsyncWriteExt;
 
-use crate::application::{ContainerRuntime, ExecStatus, OutputObserver, RuntimeError};
+use crate::application::{
+    ContainerRuntime, ExecStatus, InputReceiver, OutputObserver, RuntimeError,
+};
 use crate::domain::{ContainerSpec, JobId, MemoryUsage, StreamKind, TaskId};
 
 /// Linux `IFNAMSIZ` - 1: a bridge interface name is `<prefix><13 hex>`.
@@ -308,6 +310,7 @@ impl ContainerRuntime for DockerRuntime {
         container_id: &str,
         command: &str,
         input: Option<&[u8]>,
+        mut stream: Option<InputReceiver>,
         timeout: Duration,
         observer: &mut dyn OutputObserver,
     ) -> Result<ExecStatus, RuntimeError> {
@@ -317,7 +320,7 @@ impl ContainerRuntime for DockerRuntime {
                 container_id,
                 CreateExecOptions {
                     cmd: Some(vec!["/bin/sh", "-c", command]),
-                    attach_stdin: input.map(|_| true),
+                    attach_stdin: (input.is_some() || stream.is_some()).then_some(true),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     ..Default::default()
@@ -337,12 +340,26 @@ impl ContainerRuntime for DockerRuntime {
             // Write and read concurrently: a large input would otherwise
             // deadlock against a process that fills its output pipe first.
             let write = async {
-                if let Some(bytes) = input {
-                    // A process that exits without reading all of its stdin
-                    // closes the pipe; that is not an error of the step.
-                    let _ = stdin.write_all(bytes).await;
-                    let _ = stdin.shutdown().await;
+                if input.is_none() && stream.is_none() {
+                    return;
                 }
+                // A process that exits without reading all of its stdin
+                // closes the pipe; that is not an error of the step.
+                if let Some(bytes) = input {
+                    if stdin.write_all(bytes).await.is_err() {
+                        return;
+                    }
+                }
+                // Streamed chunks until the sender closes. A write that
+                // blocks only stalls this future, under the step timeout.
+                if let Some(chunks) = stream.as_mut() {
+                    while let Some(chunk) = chunks.next().await {
+                        if stdin.write_all(&chunk).await.is_err() || stdin.flush().await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                let _ = stdin.shutdown().await;
             };
             let read = async {
                 while let Some(frame) = output.next().await {
@@ -358,8 +375,16 @@ impl ContainerRuntime for DockerRuntime {
                 }
                 Ok(())
             };
-            let ((), result) = tokio::join!(write, read);
-            result
+            // A streamed stdin may stay open after the process exits, so the
+            // step ends with the output, never with the writer.
+            tokio::pin!(write, read);
+            let mut writing = true;
+            loop {
+                tokio::select! {
+                    result = &mut read => break result,
+                    () = &mut write, if writing => writing = false,
+                }
+            }
         };
         // On timeout the process keeps running inside the container; the task
         // halts and the whole container is removed, which kills it.
@@ -390,6 +415,7 @@ impl ContainerRuntime for DockerRuntime {
             .exec(
                 container_id,
                 READ_MEMORY,
+                None,
                 None,
                 Duration::from_secs(5),
                 &mut out,
