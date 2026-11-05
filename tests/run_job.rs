@@ -5,12 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use cellrun::application::{
-    ContainerRuntime, EventSink, ExecStatus, OutputLimits, OutputObserver, RunJob, RuntimeError,
+    CONTROL_QUEUE_LINES, ContainerRuntime, ControlMessage, ControlRouter, EventSink, ExecStatus,
+    InputReceiver, OutputLimits, OutputObserver, RunJob, RuntimeError,
 };
 use cellrun::domain::{
     ContainerSpec, Event, Job, JobId, MemoryUsage, Step, StepOutcome, StreamKind, Task, TaskId,
     TaskStatus,
 };
+use futures_util::StreamExt;
 
 /// What the fake runtime does for a given command.
 #[derive(Clone)]
@@ -38,6 +40,8 @@ struct FakeRuntime {
     fail_start: bool,
     delay: Duration,
     calls: Mutex<Vec<String>>,
+    /// Chunks received on streamed stdin, as `"<container> <text>"`.
+    streamed: Mutex<Vec<String>>,
     live: AtomicUsize,
     peak: AtomicUsize,
 }
@@ -52,6 +56,17 @@ impl FakeRuntime {
 
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn streamed(&self) -> Vec<String> {
+        self.streamed.lock().unwrap().clone()
+    }
+
+    /// Yields until the fake has been asked to exec `call`.
+    async fn wait_for(&self, call: &str) {
+        while !self.calls().iter().any(|c| c == call) {
+            tokio::task::yield_now().await;
+        }
     }
 }
 
@@ -76,6 +91,7 @@ impl ContainerRuntime for FakeRuntime {
         container_id: &str,
         command: &str,
         _: Option<&[u8]>,
+        stream: Option<InputReceiver>,
         _: Duration,
         observer: &mut dyn OutputObserver,
     ) -> Result<ExecStatus, RuntimeError> {
@@ -89,6 +105,15 @@ impl ContainerRuntime for FakeRuntime {
             .cloned()
             .unwrap_or(Script::ok(&[]));
         tokio::time::sleep(self.delay + script.delay).await;
+        if let Some(mut stream) = stream {
+            while let Some(chunk) = stream.next().await {
+                let text = String::from_utf8_lossy(&chunk).into_owned();
+                self.streamed
+                    .lock()
+                    .unwrap()
+                    .push(format!("{container_id} {text}"));
+            }
+        }
         for chunk in script.stdout {
             observer.on_output(StreamKind::Stdout, chunk.as_bytes());
         }
@@ -423,4 +448,144 @@ async fn lines_longer_than_max_line_bytes_are_split() {
             "out t#0 Stdout 89"
         ]
     );
+}
+
+fn streaming_step(run: &str) -> Step {
+    let mut s = step(run);
+    s.stdin_stream = true;
+    s
+}
+
+fn line(task: &str, text: &str) -> ControlMessage {
+    ControlMessage::Line {
+        task: task.into(),
+        line: text.into(),
+    }
+}
+
+fn warnings(sink: &RecordingSink) -> Vec<String> {
+    sink.0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l.strip_prefix("warn ").map(str::to_owned))
+        .collect()
+}
+
+#[tokio::test]
+async fn control_lines_reach_only_their_task_and_eof_closes_the_stream() {
+    let runtime = FakeRuntime::default();
+    let sink = RecordingSink::default();
+    let router = ControlRouter::new();
+    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(2))
+        .with_control(router.clone());
+    let j = job(vec![
+        task("a", vec![streaming_step("cat")]),
+        task("b", vec![streaming_step("cat")]),
+    ]);
+
+    let driver = async {
+        runtime.wait_for("exec c-a cat").await;
+        runtime.wait_for("exec c-b cat").await;
+        router.handle(&sink, line("a", "one"));
+        router.handle(&sink, line("b", "two"));
+        router.handle(&sink, line("a", "three"));
+        router.close_all();
+    };
+    let (report, ()) = tokio::join!(use_case.execute(&j), driver);
+
+    assert!(report.succeeded());
+    let mut got = runtime.streamed();
+    got.sort();
+    assert_eq!(got, ["c-a one\n", "c-a three\n", "c-b two\n"]);
+    assert!(warnings(&sink).is_empty());
+}
+
+#[tokio::test]
+async fn full_queue_drops_new_lines_with_a_warning_that_hides_the_text() {
+    let runtime = FakeRuntime::default();
+    let sink = RecordingSink::default();
+    let router = ControlRouter::new();
+    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(1))
+        .with_control(router.clone());
+    let j = job(vec![task("a", vec![streaming_step("cat")])]);
+
+    let driver = async {
+        runtime.wait_for("exec c-a cat").await;
+        // No await between sends: the step cannot drain the queue meanwhile.
+        for i in 0..CONTROL_QUEUE_LINES + 2 {
+            router.handle(&sink, line("a", &format!("secret-{i}")));
+        }
+        router.close_all();
+    };
+    let (report, ()) = tokio::join!(use_case.execute(&j), driver);
+
+    assert!(report.succeeded());
+    assert_eq!(runtime.streamed().len(), CONTROL_QUEUE_LINES);
+    let warned = warnings(&sink);
+    assert_eq!(warned.len(), 2);
+    assert!(warned.iter().all(|w| w.contains("queued")));
+    assert!(sink.0.lock().unwrap().iter().all(|l| !l.contains("secret")));
+}
+
+#[tokio::test]
+async fn lines_for_unknown_or_non_streaming_tasks_warn() {
+    let runtime = FakeRuntime::default();
+    let sink = RecordingSink::default();
+    let router = ControlRouter::new();
+    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(2))
+        .with_control(router.clone());
+    let j = job(vec![
+        task("a", vec![streaming_step("cat")]),
+        task("plain", vec![step("sleep")]),
+    ]);
+
+    let driver = async {
+        runtime.wait_for("exec c-a cat").await;
+        runtime.wait_for("exec c-plain sleep").await;
+        router.handle(&sink, line("plain", "hidden-1"));
+        router.handle(&sink, line("ghost", "hidden-2"));
+        router.handle(&sink, line("bad id!", "hidden-3"));
+        router.handle(&sink, ControlMessage::Malformed);
+        router.handle(&sink, ControlMessage::Oversized);
+        router.close_all();
+    };
+    let (report, ()) = tokio::join!(use_case.execute(&j), driver);
+
+    assert!(report.succeeded());
+    assert!(runtime.streamed().is_empty());
+    assert_eq!(warnings(&sink).len(), 5);
+    assert!(sink.0.lock().unwrap().iter().all(|l| !l.contains("hidden")));
+
+    // Once the step has ended the task is no longer streaming.
+    router.handle(&sink, line("a", "late"));
+    assert_eq!(warnings(&sink).len(), 6);
+}
+
+#[tokio::test]
+async fn streamed_steps_started_after_control_eof_get_eof_at_once() {
+    let runtime = FakeRuntime::default();
+    let sink = RecordingSink::default();
+    let router = ControlRouter::new();
+    router.close_all();
+    let use_case = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(1))
+        .with_control(router.clone());
+
+    let report = use_case
+        .execute(&job(vec![task("a", vec![streaming_step("cat")])]))
+        .await;
+
+    assert!(report.succeeded());
+    router.handle(&sink, line("a", "late"));
+    assert!(runtime.streamed().is_empty());
+}
+
+#[tokio::test]
+async fn without_a_control_input_streamed_stdin_is_closed_immediately() {
+    let runtime = FakeRuntime::default();
+    let sink = RecordingSink::default();
+    let report = RunJob::new(&runtime, &sink, OutputLimits::default(), parallel(1))
+        .execute(&job(vec![task("a", vec![streaming_step("cat")])]))
+        .await;
+    assert!(report.succeeded());
 }

@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use cellrun::application::{ContainerRuntime, ExecStatus, OutputObserver};
+use cellrun::application::{ContainerRuntime, ExecStatus, OutputObserver, input_channel};
 use cellrun::domain::{ContainerSpec, JobId, StreamKind, TaskId};
 use cellrun::infrastructure::{DockerConfig, DockerRuntime};
 
@@ -46,6 +46,7 @@ async fn exec_pipes_large_stdin_and_closes_it() {
             &id,
             "cat",
             Some(input.as_bytes()),
+            None,
             Duration::from_secs(30),
             &mut out,
         )
@@ -53,6 +54,42 @@ async fn exec_pipes_large_stdin_and_closes_it() {
         .unwrap();
     assert_eq!(status, ExecStatus::Exited(0));
     assert_eq!(out.stdout, input.as_bytes());
+
+    runtime.remove(&id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a Docker daemon"]
+async fn exec_streams_stdin_until_the_stream_closes() {
+    let runtime = DockerRuntime::connect(DockerConfig::default()).unwrap();
+    let job = JobId::new("it-stream").unwrap();
+    let task = TaskId::new("t").unwrap();
+    let spec = ContainerSpec::new(image()).unwrap();
+    let id = runtime.start(&job, &task, &spec).await.unwrap();
+
+    let (tx, rx) = input_channel(8);
+    let feed = async {
+        for text in ["first\n", "second\n"] {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tx.try_send(text.as_bytes().to_vec()).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(tx); // EOF: `cat` exits by itself
+    };
+    let mut out = Collect::default();
+    let (status, ()) = tokio::join!(
+        runtime.exec(
+            &id,
+            "cat",
+            Some(b"initial\n"),
+            Some(rx),
+            Duration::from_secs(30),
+            &mut out,
+        ),
+        feed
+    );
+    assert_eq!(status.unwrap(), ExecStatus::Exited(0));
+    assert_eq!(out.stdout, b"initial\nfirst\nsecond\n");
 
     runtime.remove(&id).await.unwrap();
 }
@@ -76,6 +113,7 @@ async fn container_lifecycle() {
             &id,
             "echo $FOO; pwd; echo oops >&2; exit 4",
             None,
+            None,
             Duration::from_secs(10),
             &mut out,
         )
@@ -88,13 +126,21 @@ async fn container_lifecycle() {
     // State persists between steps of the same task.
     let mut out = Collect::default();
     runtime
-        .exec(&id, "touch marker", None, Duration::from_secs(10), &mut out)
+        .exec(
+            &id,
+            "touch marker",
+            None,
+            None,
+            Duration::from_secs(10),
+            &mut out,
+        )
         .await
         .unwrap();
     let status = runtime
         .exec(
             &id,
             "test -f marker",
+            None,
             None,
             Duration::from_secs(10),
             &mut out,
@@ -104,7 +150,14 @@ async fn container_lifecycle() {
     assert_eq!(status, ExecStatus::Exited(0));
 
     let status = runtime
-        .exec(&id, "sleep 5", None, Duration::from_millis(300), &mut out)
+        .exec(
+            &id,
+            "sleep 5",
+            None,
+            None,
+            Duration::from_millis(300),
+            &mut out,
+        )
         .await
         .unwrap();
     assert_eq!(status, ExecStatus::TimedOut);
@@ -210,7 +263,7 @@ async fn remove_backend_service(docker: &Docker) {
 async fn sh(runtime: &DockerRuntime, id: &str, script: &str) -> String {
     let mut out = Collect::default();
     runtime
-        .exec(id, script, None, Duration::from_secs(60), &mut out)
+        .exec(id, script, None, None, Duration::from_secs(60), &mut out)
         .await
         .unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
@@ -301,9 +354,57 @@ async fn remove_owned_spares_concurrent_runs_of_the_same_job() {
     // Run B's container is still alive and usable.
     let mut out = Collect::default();
     let status = run_b
-        .exec(&b, "true", None, Duration::from_secs(10), &mut out)
+        .exec(&b, "true", None, None, Duration::from_secs(10), &mut out)
         .await
         .unwrap();
     assert_eq!(status, ExecStatus::Exited(0));
     assert_eq!(run_b.remove_owned().await.unwrap(), 1);
+}
+
+/// Real binary: job from a file, control lines on stdin (`--control -`),
+/// `cat` echoes them and stdin EOF ends the step.
+#[test]
+#[ignore = "requires a Docker daemon"]
+fn dispatcher_streams_control_lines_from_stdin() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = std::env::temp_dir().join(format!("cellrun-ctl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let job = dir.join("job.json");
+    let events = dir.join("events.ndjson");
+    let body = format!(
+        r#"{{"id":"it-ctl","tasks":[{{"id":"a","image":"{}","steps":[
+            {{"run":"cat","stdin":"init\n","stdin_stream":true,"timeout_secs":60}}]}}]}}"#,
+        image()
+    );
+    std::fs::write(&job, body).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dispatcher"))
+        .args(["run"])
+        .arg(&job)
+        .args(["--control", "-", "--events"])
+        .arg(&events)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    for text in ["one", "two"] {
+        writeln!(stdin, r#"{{"task":"a","line":"{text}"}}"#).unwrap();
+        stdin.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    drop(stdin); // EOF: the step ends
+    let out = child.wait_with_output().unwrap();
+    let log = std::fs::read_to_string(&events).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    assert!(out.status.success(), "{log}");
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        report.contains(r#""stdout_tail": "init\none\ntwo\n""#),
+        "{report}"
+    );
 }

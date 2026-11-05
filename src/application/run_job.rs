@@ -9,6 +9,7 @@ use crate::domain::{
     Task, TaskId, TaskReport, TaskStatus,
 };
 
+use crate::application::control::{ControlRouter, InputReceiver};
 use crate::application::ports::{ContainerRuntime, EventSink, ExecStatus, OutputObserver};
 
 /// Memory caps for captured output, per step and stream.
@@ -36,6 +37,8 @@ pub struct RunJob<R, S> {
     limits: OutputLimits,
     /// Task containers alive at once; sized to the host, not the job.
     max_parallel: NonZeroUsize,
+    /// Where streamed stdin comes from; `None` when there is no control input.
+    control: Option<ControlRouter>,
 }
 
 impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
@@ -45,7 +48,16 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
             sink,
             limits,
             max_parallel,
+            control: None,
         }
+    }
+
+    /// Feeds `stdin_stream` steps from `router`. Without it their stdin is
+    /// closed right after the initial `stdin`.
+    #[must_use]
+    pub fn with_control(mut self, router: ControlRouter) -> Self {
+        self.control = Some(router);
+        self
     }
 
     pub fn runtime(&self) -> &R {
@@ -125,12 +137,17 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
                 });
                 let step_started = Instant::now();
                 let mut capture = StepCapture::new(&self.sink, &task.id, index, self.limits);
+                let stream = step.stdin_stream.then(|| match &self.control {
+                    Some(router) => router.open(&task.id),
+                    None => InputReceiver::closed(),
+                });
                 let outcome = match self
                     .runtime
                     .exec(
                         &container_id,
                         &step.run,
                         step.stdin.as_deref().map(str::as_bytes),
+                        stream,
                         step.timeout,
                         &mut capture,
                     )
@@ -143,6 +160,9 @@ impl<R: ContainerRuntime, S: EventSink> RunJob<R, S> {
                         message: err.to_string(),
                     },
                 };
+                if let Some(router) = self.control.as_ref().filter(|_| step.stdin_stream) {
+                    router.release(&task.id);
+                }
                 capture.into_report(&step.name, outcome, step_started.elapsed())
             };
             halted |= report.outcome.halts_task(step.continue_on_error);
