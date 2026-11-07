@@ -58,6 +58,47 @@ async fn exec_pipes_large_stdin_and_closes_it() {
     runtime.remove(&id).await.unwrap();
 }
 
+/// `resolv.conf` of a fresh task container under `config`.
+async fn resolv_conf(config: DockerConfig, name: &str) -> String {
+    let runtime = DockerRuntime::connect(config).unwrap();
+    let job = JobId::new(name).unwrap();
+    let task = TaskId::new("t").unwrap();
+    let id = runtime
+        .start(&job, &task, &ContainerSpec::new(image()).unwrap())
+        .await
+        .unwrap();
+    let mut out = Collect::default();
+    runtime
+        .exec(
+            &id,
+            "cat /etc/resolv.conf",
+            None,
+            None,
+            Duration::from_secs(30),
+            &mut out,
+        )
+        .await
+        .unwrap();
+    runtime.remove(&id).await.unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires a Docker daemon"]
+async fn dns_options_reach_the_task_resolv_conf() {
+    let with = resolv_conf(
+        DockerConfig {
+            dns_options: vec!["use-vc".to_owned()],
+            ..DockerConfig::default()
+        },
+        "it-dnsopt",
+    )
+    .await;
+    assert!(with.contains("options use-vc"), "{with}");
+    let without = resolv_conf(DockerConfig::default(), "it-nodnsopt").await;
+    assert!(!without.contains("use-vc"), "{without}");
+}
+
 #[tokio::test]
 #[ignore = "requires a Docker daemon"]
 async fn exec_streams_stdin_until_the_stream_closes() {

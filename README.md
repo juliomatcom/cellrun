@@ -86,6 +86,7 @@ dispatcher cleanup --all             # remove leftovers of every job with this l
 Host settings (flag / env, never from job files):
   --task-runtime  DISPATCHER_TASK_RUNTIME   OCI runtime for tasks, e.g. runsc (gVisor)
   --task-dns      DISPATCHER_TASK_DNS       public DNS for tasks (default 1.1.1.1,8.8.8.8)
+  --task-dns-options DISPATCHER_TASK_DNS_OPTIONS resolv.conf options for tasks, e.g. use-vc = DNS over TCP (default none)
   --label-prefix  DISPATCHER_LABEL_PREFIX   labels <prefix>.dispatcher/.job/.task/.run (default cellrun)
   --bridge-prefix DISPATCHER_BRIDGE_PREFIX  task bridges <prefix><hex> (default cr; 1-2 chars [a-z0-9])
 ```

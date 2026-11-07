@@ -49,6 +49,15 @@ struct TaskArgs {
         default_value = "1.1.1.1,8.8.8.8"
     )]
     task_dns: Vec<String>,
+    /// `resolv.conf` options for task containers (`use-vc`: DNS over TCP,
+    /// for tasks that close UDP; Go programs read it there, not from the env).
+    #[arg(
+        long,
+        global = true,
+        env = "DISPATCHER_TASK_DNS_OPTIONS",
+        value_delimiter = ','
+    )]
+    task_dns_options: Vec<String>,
     /// Prefix of the labels on containers and networks (`<prefix>.job`, ...).
     /// Keep it stable: `cleanup` only finds resources labelled with it.
     #[arg(
@@ -74,6 +83,12 @@ impl TaskArgs {
         DockerConfig {
             pull,
             dns: self.task_dns.clone(),
+            dns_options: self
+                .task_dns_options
+                .iter()
+                .filter(|o| !o.is_empty())
+                .cloned()
+                .collect(),
             runtime: self.task_runtime.clone().filter(|r| !r.is_empty()),
             label_prefix: self.label_prefix.clone(),
             bridge_prefix: self.bridge_prefix.clone(),

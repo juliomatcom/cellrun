@@ -81,6 +81,9 @@ pub struct DockerConfig {
     /// Upstream DNS for task containers. Public resolvers keep DNS working
     /// while private ranges are firewalled off.
     pub dns: Vec<String>,
+    /// `resolv.conf` options of task containers (Docker's `--dns-option`),
+    /// e.g. `use-vc` for DNS over TCP. Empty: Docker's defaults.
+    pub dns_options: Vec<String>,
     /// OCI runtime for task containers, e.g. `runsc` (gVisor).
     pub runtime: Option<String>,
     /// Prefix of the labels put on containers and networks
@@ -98,6 +101,7 @@ impl Default for DockerConfig {
             pull: PullPolicy::Missing,
             default_pids_limit: Some(512),
             dns: vec!["1.1.1.1".to_owned(), "8.8.8.8".to_owned()],
+            dns_options: Vec::new(),
             runtime: None,
             label_prefix: "cellrun".to_owned(),
             bridge_prefix: "cr".to_owned(),
@@ -215,6 +219,8 @@ impl DockerRuntime {
         let host_config = HostConfig {
             network_mode: Some(name.to_owned()),
             dns: Some(self.config.dns.clone()),
+            dns_options: (!self.config.dns_options.is_empty())
+                .then(|| self.config.dns_options.clone()),
             runtime: self.config.runtime.clone(),
             ipc_mode: Some("private".to_owned()),
             init: Some(true),
