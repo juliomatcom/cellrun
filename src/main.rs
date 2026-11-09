@@ -14,8 +14,8 @@ use cellrun::application::{
 };
 use cellrun::domain::{Event, Isolation, Job, JobId};
 use cellrun::infrastructure::{
-    ControlReader, DEFAULT_DENY_NETWORK, DockerConfig, DockerRuntime, NdjsonSink, PullPolicy,
-    SbxConfig, SbxRuntime, VmRuntime, open_control, parse_job, write_report,
+    ControlReader, DockerConfig, DockerRuntime, NdjsonSink, PullPolicy, SbxConfig, SbxRuntime,
+    VmRuntime, open_control, parse_job, write_report,
 };
 
 /// What the use case runs on: Docker for container tasks, the VM backend for
@@ -95,10 +95,10 @@ struct TaskArgs {
     /// The `sbx` executable (Docker Sandboxes), for `--vm-backend sbx`.
     #[arg(long, global = true, env = "DISPATCHER_SBX_BIN", default_value = "sbx")]
     sbx_bin: String,
-    /// Egress deny rules added to every VM task, on top of the backend's own
-    /// policy (so the VM cannot reach the host's LAN or the cloud metadata
-    /// server). Empty: private, link-local, loopback and CGNAT ranges;
-    /// `none`: no extra rules.
+    /// Extra egress deny rules for every VM task (e.g. the host's own public
+    /// IP). They add to the built-in ones, which always apply: private,
+    /// link-local/metadata, loopback, "this host", CGNAT, multicast and the
+    /// names that reach the host.
     #[arg(
         long,
         global = true,
@@ -119,14 +119,12 @@ impl TaskArgs {
     }
 
     fn sbx_config(&self, pull: PullPolicy) -> SbxConfig {
-        let deny_network = match self.vm_deny_network.as_slice() {
-            [] => DEFAULT_DENY_NETWORK
-                .iter()
-                .map(|r| (*r).to_owned())
-                .collect(),
-            [only] if only == "none" => Vec::new(),
-            rules => rules.iter().filter(|r| !r.is_empty()).cloned().collect(),
-        };
+        let deny_network = self
+            .vm_deny_network
+            .iter()
+            .filter(|r| !r.is_empty())
+            .cloned()
+            .collect();
         SbxConfig {
             bin: self.sbx_bin.clone(),
             pull,

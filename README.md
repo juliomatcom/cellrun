@@ -102,8 +102,8 @@ Host settings (flag / env, never from job files):
   --bridge-prefix DISPATCHER_BRIDGE_PREFIX  task bridges <prefix><hex> (default cr; 1-2 chars [a-z0-9])
   --vm-backend    DISPATCHER_VM_BACKEND     backend for isolation "vm" (default sbx)
   --sbx-bin       DISPATCHER_SBX_BIN        the sbx executable (default sbx)
-  --vm-deny-network DISPATCHER_VM_DENY_NETWORK egress rules denied in every VM, on top of the backend's policy
-                                            (default: private, link-local/metadata, loopback, CGNAT; `none` = no extra rules)
+  --vm-deny-network DISPATCHER_VM_DENY_NETWORK extra egress rules denied in every VM (e.g. the host's public IP); they add to
+                                            the built-in ones that always apply (private, link-local/metadata, loopback, 0.0.0.0, CGNAT, multicast, localhost names)
 ```
 
 Exit codes: `0` all tasks succeeded · `1` some task failed · `2` invalid

@@ -28,9 +28,12 @@ use crate::domain::{ContainerSpec, JobId, MemoryUsage, StreamKind, TaskId};
 
 use super::docker::{PullPolicy, lock, unique_hex};
 
-/// Private, link-local, loopback, CGNAT and cloud-metadata ranges: the host's
-/// own network must stay out of reach of the workload (the VM counterpart of
-/// the host firewall rules container tasks rely on).
+/// What a VM must never reach, always applied on top of the host's `sbx` policy (deny wins over allow): private,
+/// link-local (cloud metadata), loopback, "this host" (`0.0.0.0` connects to the host's own loopback), CGNAT,
+/// benchmarking, multicast and IPv6 counterparts (NAT64 too), plus the names that reach the host: sbx checks
+/// addresses of direct connections but only hostnames of connections through an upstream proxy. No `::ffff:0:0/96`:
+/// sbx sees every IPv4 address in that form, so the rule would block the whole IPv4 internet (the live test checks
+/// that mapped private addresses are still denied).
 pub const DEFAULT_DENY_NETWORK: &[&str] = &[
     "10.0.0.0/8",
     "172.16.0.0/12",
@@ -38,15 +41,27 @@ pub const DEFAULT_DENY_NETWORK: &[&str] = &[
     "169.254.0.0/16",
     "100.64.0.0/10",
     "127.0.0.0/8",
+    "0.0.0.0/8",
+    "192.0.0.0/24",
+    "198.18.0.0/15",
+    "224.0.0.0/4",
     "fc00::/7",
     "fe80::/10",
+    "ff00::/8",
+    "::/128",
     "::1/128",
+    "64:ff9b::/96",
+    "localhost",
+    "host.docker.internal",
+    "gateway.docker.internal",
 ];
 
 /// `sbx` rejects anything under this.
 const MIN_MEMORY_MB: u64 = 512;
 /// Longest stderr kept in an error message.
 const ERROR_TEXT_MAX: usize = 400;
+/// Longest a management command other than `create` may take (ls, rm, secret): the api kills cleanup after 30 s.
+const SHORT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Cap on output of the short management commands (create, rm, ls).
 const COMMAND_OUTPUT_MAX: usize = 64 * 1024;
 
@@ -57,7 +72,8 @@ pub struct SbxConfig {
     pub pull: PullPolicy,
     /// Prefix of sandbox names (`[a-z0-9-]`, no `.`).
     pub name_prefix: String,
-    /// Extra per-sandbox egress deny rules, on top of the host's policy.
+    /// Extra per-sandbox egress deny rules (e.g. the host's own public IP), added to [`DEFAULT_DENY_NETWORK`],
+    /// which always applies.
     pub deny_network: Vec<String>,
     /// Longest `sbx create` (it may pull and boot a VM).
     pub create_timeout: Duration,
@@ -69,10 +85,7 @@ impl Default for SbxConfig {
             bin: "sbx".to_owned(),
             pull: PullPolicy::Missing,
             name_prefix: "cellrun".to_owned(),
-            deny_network: DEFAULT_DENY_NETWORK
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
+            deny_network: Vec::new(),
             create_timeout: Duration::from_secs(600),
         }
     }
@@ -92,6 +105,35 @@ pub struct SbxRuntime {
     config: SbxConfig,
     run_id: String,
     sandboxes: Mutex<HashMap<String, Sandbox>>,
+}
+
+/// Variables of the clean base that a task's env must not replace.
+fn is_base_var(name: &str) -> bool {
+    matches!(name, "HOME" | "PATH" | "USER" | "LANG" | "TMPDIR")
+        || name.starts_with("XDG_")
+        || name.starts_with("SBX_")
+        || name.starts_with("DOCKER_SANDBOXES_")
+}
+
+/// A bare `sbx` command with a clean environment: the dispatcher's own env holds every real key (the api passes
+/// them for the secrets), and `sbx` would hand any variable it is asked for by name to a sandbox. Only what the
+/// CLI needs to find its daemon and login passes: HOME and the XDG dirs, PATH, and sbx's own settings.
+fn sbx_command(bin: &str) -> Command {
+    let mut command = Command::new(bin);
+    command.env_clear();
+    for (key, value) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        let wanted = matches!(
+            name.as_ref(),
+            "HOME" | "PATH" | "USER" | "LANG" | "TMPDIR" | "XDG_RUNTIME_DIR"
+        ) || name.starts_with("XDG_")
+            || name.starts_with("SBX_")
+            || name.starts_with("DOCKER_SANDBOXES_");
+        if wanted {
+            command.env(key, value);
+        }
+    }
+    command
 }
 
 impl SbxRuntime {
@@ -127,7 +169,7 @@ impl SbxRuntime {
     }
 
     async fn sandbox_names(&self) -> Result<Vec<String>, RuntimeError> {
-        let out = self.run(&["ls", "--quiet"], None).await?;
+        let out = self.run(&["ls", "--quiet"], None, SHORT_TIMEOUT).await?;
         Ok(out.lines().map(|l| l.trim().to_owned()).collect())
     }
 
@@ -148,7 +190,7 @@ impl SbxRuntime {
         }
         let mut args = vec!["rm", "--force"];
         args.extend(names.iter().map(String::as_str));
-        self.run(&args, None).await?;
+        self.run(&args, None, SHORT_TIMEOUT).await?;
         let mut sandboxes = lock(&self.sandboxes);
         for name in &names {
             sandboxes.remove(name);
@@ -158,8 +200,13 @@ impl SbxRuntime {
 
     /// Runs a short `sbx` command to completion and returns its stdout.
     /// `stdin` is written then closed; error text is stderr, trimmed.
-    async fn run(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<String, RuntimeError> {
-        let mut command = Command::new(&self.config.bin);
+    async fn run(
+        &self,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        timeout: Duration,
+    ) -> Result<String, RuntimeError> {
+        let mut command = sbx_command(&self.config.bin);
         command
             .args(args)
             .stdin(if stdin.is_some() {
@@ -179,7 +226,7 @@ impl SbxRuntime {
             let _ = pipe.write_all(bytes).await;
             let _ = pipe.shutdown().await;
         }
-        let output = tokio::time::timeout(self.config.create_timeout, child.wait_with_output())
+        let output = tokio::time::timeout(timeout, child.wait_with_output())
             .await
             .map_err(|_| RuntimeError::new(format!("`sbx {}` timed out", args[0])))?
             .map_err(|e| RuntimeError::new(e.to_string()))?;
@@ -201,7 +248,10 @@ impl SbxRuntime {
         name: &str,
         placeholders: &[(String, String)],
     ) -> Result<(), RuntimeError> {
-        let result = match self.run(&["rm", "--force", name], None).await {
+        let result = match self
+            .run(&["rm", "--force", name], None, SHORT_TIMEOUT)
+            .await
+        {
             Err(e) if !e.0.contains("not found") => Err(e),
             _ => Ok(()),
         };
@@ -210,6 +260,7 @@ impl SbxRuntime {
                 .run(
                     &["secret", "rm", "--placeholder", placeholder, "--force"],
                     None,
+                    SHORT_TIMEOUT,
                 )
                 .await;
         }
@@ -290,9 +341,13 @@ fn create_args(config: &SbxConfig, name: &str, spec: &ContainerSpec) -> Vec<Stri
             bytes.div_ceil(1024 * 1024).max(MIN_MEMORY_MB)
         ));
     }
-    for rule in &config.deny_network {
-        args.push("--deny-network".to_owned());
-        args.push(rule.clone());
+    let defaults = DEFAULT_DENY_NETWORK.iter().map(|r| (*r).to_owned());
+    let mut seen = std::collections::HashSet::new();
+    for rule in defaults.chain(config.deny_network.iter().cloned()) {
+        if seen.insert(rule.clone()) {
+            args.push("--deny-network".to_owned());
+            args.push(rule);
+        }
     }
     args.extend(["-t".to_owned(), spec.image.clone(), "shell".to_owned()]);
     args
@@ -361,7 +416,11 @@ impl ContainerRuntime for SbxRuntime {
         let name = sandbox_name(&self.config.name_prefix, &self.run_id, job, task, &id);
         let args = create_args(&self.config, &name, spec);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.run(&args, None).await?;
+        if let Err(e) = self.run(&args, None, self.config.create_timeout).await {
+            // The daemon may still finish a VM whose client timed out or died: never leave it behind.
+            let _ = self.destroy(&name, &[]).await;
+            return Err(e);
+        }
 
         let mut placeholders = Vec::with_capacity(spec.secrets.len());
         for secret in &spec.secrets {
@@ -369,7 +428,10 @@ impl ContainerRuntime for SbxRuntime {
             let args = secret_args(&name, &secret.env, &placeholder, &secret.hosts);
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             placeholders.push((secret.env.clone(), placeholder));
-            if let Err(e) = self.run(&args, Some(secret.value.as_bytes())).await {
+            if let Err(e) = self
+                .run(&args, Some(secret.value.as_bytes()), SHORT_TIMEOUT)
+                .await
+            {
                 // Never leave a sandbox (or a stored secret) behind.
                 let _ = self.destroy(&name, &placeholders).await;
                 return Err(e);
@@ -407,9 +469,16 @@ impl ContainerRuntime for SbxRuntime {
             )
         };
         let interactive = input.is_some() || stream.is_some();
-        let mut child = Command::new(&self.config.bin)
+        // The task's env values reach `sbx exec` by name (`-e KEY`), through the client's own environment, on top of
+        // the clean base, which wins for the variables sbx itself reads.
+        let mut command = sbx_command(&self.config.bin);
+        for (key, value) in env {
+            if std::env::var_os(&key).is_none() || !is_base_var(&key) {
+                command.env(key, value);
+            }
+        }
+        let mut child = command
             .args(&args)
-            .envs(env)
             .stdin(if interactive {
                 Stdio::piped()
             } else {
@@ -539,7 +608,7 @@ mod tests {
         spec.limits.nano_cpus = Some(1_500_000_000);
         spec.limits.memory_bytes = Some(256 * 1024 * 1024);
         let config = SbxConfig {
-            deny_network: vec!["10.0.0.0/8".to_owned()],
+            deny_network: vec!["203.0.113.7".to_owned(), "10.0.0.0/8".to_owned()],
             ..SbxConfig::default()
         };
         let args = create_args(&config, "n", &spec).join(" ");
@@ -548,7 +617,24 @@ mod tests {
             args.contains("--memory 512m"),
             "below sbx's minimum: {args}"
         );
-        assert!(args.contains("--deny-network 10.0.0.0/8"), "{args}");
+        // The defaults always apply, the host's extra rules come on top, nothing twice.
+        for rule in [
+            "10.0.0.0/8",
+            "0.0.0.0/8",
+            "localhost",
+            "host.docker.internal",
+            "203.0.113.7",
+        ] {
+            assert!(
+                args.contains(&format!("--deny-network {rule}")),
+                "{rule}: {args}"
+            );
+        }
+        assert_eq!(
+            args.matches("--deny-network 10.0.0.0/8").count(),
+            1,
+            "{args}"
+        );
         assert!(args.ends_with("-t agthy/runner:engineer shell"), "{args}");
         assert!(!args.contains("--env"), "env never goes on create");
     }
