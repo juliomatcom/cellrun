@@ -211,7 +211,10 @@ known to the backend (for `sbx`: a saved or loaded template, or one of its
 agent images). `memory_mb` and `cpus` size the VM (`sbx` minimum 512 MiB);
 `swap_mb` and `pids` do not apply. Networking is the backend's policy plus
 `--vm-deny-network`. Names are `<label-prefix>.<run>.<job>.<task>.<id>`, so
-`cleanup` finds them without labels. Memory peaks are not reported for VMs.
+`cleanup` finds them without labels. Memory peaks are not reported for VMs. The
+backend's CLI (`sbx`) starts from a clean environment (`HOME`, `PATH`, `XDG_*`,
+`SBX_*`), never the dispatcher's, which holds the values of `secrets`; a failed
+or timed-out create removes its sandbox by name.
 
 ```jsonc
 "secrets": [{ "env": "GITHUB_TOKEN", "hosts": ["github.com", "api.github.com"] }]
