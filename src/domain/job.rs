@@ -58,6 +58,39 @@ pub struct ResourceLimits {
     pub pids: Option<u64>,
 }
 
+/// How strongly a task is isolated from the host kernel. A job can only ask
+/// for more isolation (`Vm`), never less.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Isolation {
+    /// A container on the host's kernel (the default).
+    #[default]
+    Container,
+    /// A microVM with its own kernel; secrets stay on the host.
+    Vm,
+}
+
+/// A secret the runtime injects into outbound requests to `hosts`, so the
+/// workload never holds the value: inside the task `env` holds a placeholder.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretSpec {
+    /// Name of the env var the workload sees (holding the placeholder).
+    pub env: String,
+    /// The real value. Only in memory, never in reports, events or logs.
+    pub value: String,
+    /// Hosts the value may be sent to (exact names or wildcards).
+    pub hosts: Vec<String>,
+}
+
+impl std::fmt::Debug for SecretSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretSpec")
+            .field("env", &self.env)
+            .field("value", &"<redacted>")
+            .field("hosts", &self.hosts)
+            .finish()
+    }
+}
+
 /// What container a task runs in.
 ///
 /// Deliberately has no network, mount or privilege settings: every task is
@@ -70,6 +103,9 @@ pub struct ContainerSpec {
     pub env: Vec<(String, String)>,
     pub workdir: Option<String>,
     pub limits: ResourceLimits,
+    pub isolation: Isolation,
+    /// Injected-secret bindings; only valid with [`Isolation::Vm`].
+    pub secrets: Vec<SecretSpec>,
 }
 
 impl ContainerSpec {
@@ -83,6 +119,8 @@ impl ContainerSpec {
             env: Vec::new(),
             workdir: None,
             limits: ResourceLimits::default(),
+            isolation: Isolation::default(),
+            secrets: Vec::new(),
         })
     }
 }

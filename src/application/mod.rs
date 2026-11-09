@@ -5,6 +5,7 @@
 
 pub mod control;
 pub mod ports;
+pub mod routing;
 pub mod run_job;
 
 pub use control::{
@@ -12,4 +13,5 @@ pub use control::{
     MAX_CONTROL_LINE_BYTES, SendError, input_channel,
 };
 pub use ports::{ContainerRuntime, EventSink, ExecStatus, OutputObserver, RuntimeError};
+pub use routing::Routed;
 pub use run_job::{OutputLimits, RunJob};

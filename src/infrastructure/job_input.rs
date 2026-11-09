@@ -17,7 +17,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::domain::{
-    ContainerSpec, Job, JobId, ResourceLimits, Step, Task, TaskId, ValidationError,
+    ContainerSpec, Isolation, Job, JobId, ResourceLimits, SecretSpec, Step, Task, TaskId,
+    ValidationError,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
@@ -40,6 +41,8 @@ pub enum InputError {
     MissingImage { task: String },
     #[error("task `{task}`: env var `{var}` listed in env_passthrough is not set or empty")]
     MissingEnv { task: String, var: String },
+    #[error("task `{task}`: secret `{var}` is not set or empty in the dispatcher's environment")]
+    MissingSecret { task: String, var: String },
     #[error("task `{task}`: {message}")]
     Limit { task: String, message: &'static str },
 }
@@ -72,6 +75,30 @@ struct ContainerDto {
     cpus: Option<f64>,
     pids: Option<u64>,
     timeout_secs: Option<u64>,
+    /// `container` (default) or `vm`: a microVM with its own kernel. A job
+    /// can only ask for more isolation, never less.
+    isolation: Option<IsolationDto>,
+    /// Keys the runtime injects into outbound requests to the listed hosts;
+    /// the task only sees a placeholder. Values come from the dispatcher's
+    /// environment (like `env_passthrough`), never from the job file.
+    /// Only valid with `isolation: "vm"`.
+    #[serde(default)]
+    secrets: Vec<SecretDto>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum IsolationDto {
+    Container,
+    Vm,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretDto {
+    /// Dispatcher env var holding the value; also the name the task sees.
+    env: String,
+    hosts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +151,18 @@ pub fn parse_job(
     Job::new(job_id, tasks).map_err(invalid("job".into()))
 }
 
+fn valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn valid_host(host: &str) -> bool {
+    !host.is_empty() && host.len() <= 253 && !host.contains(char::is_whitespace)
+}
+
 fn to_task(
     dto: TaskDto,
     defaults: &ContainerDto,
@@ -169,6 +208,58 @@ fn to_task(
         env.insert(name.clone(), value);
     }
     env.extend(c.env);
+    let isolation = match c.isolation.or(defaults.isolation) {
+        Some(IsolationDto::Vm) => Isolation::Vm,
+        Some(IsolationDto::Container) | None => Isolation::Container,
+    };
+    // A task's binding wins over the default one with the same name.
+    let mut secret_dtos: Vec<SecretDto> = defaults
+        .secrets
+        .iter()
+        .filter(|d| !c.secrets.iter().any(|t| t.env == d.env))
+        .cloned()
+        .collect();
+    secret_dtos.extend(c.secrets.iter().cloned());
+    if !secret_dtos.is_empty() && isolation != Isolation::Vm {
+        return Err(InputError::Limit {
+            task: id.to_string(),
+            message: "`secrets` need `isolation: \"vm\"` (a container would hold the value)",
+        });
+    }
+    let mut secrets = Vec::with_capacity(secret_dtos.len());
+    for dto in secret_dtos {
+        if !valid_env_name(&dto.env) {
+            return Err(InputError::Limit {
+                task: id.to_string(),
+                message: "secret `env` must be a shell-safe name ([A-Za-z_][A-Za-z0-9_]*)",
+            });
+        }
+        if dto.hosts.is_empty() || dto.hosts.iter().any(|h| !valid_host(h)) {
+            return Err(InputError::Limit {
+                task: id.to_string(),
+                message: "secret `hosts` must list at least one host (no spaces)",
+            });
+        }
+        if env.contains_key(&dto.env) {
+            return Err(InputError::Limit {
+                task: id.to_string(),
+                message: "a secret `env` name must not also be in `env` or `env_passthrough`",
+            });
+        }
+        let value = lookup_env(&dto.env)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| InputError::MissingSecret {
+                task: id.to_string(),
+                var: dto.env.clone(),
+            })?;
+        secrets.push(SecretSpec {
+            env: dto.env,
+            value,
+            hosts: dto.hosts,
+        });
+    }
+    spec.isolation = isolation;
+    spec.secrets = secrets;
     spec.env = env.into_iter().collect();
     spec.workdir = c.workdir.or_else(|| defaults.workdir.clone());
 
@@ -259,6 +350,60 @@ mod tests {
             "BLANK" => Some(String::new()),
             _ => None,
         }
+    }
+
+    #[test]
+    fn isolation_defaults_to_container_and_vm_is_opt_in() {
+        let job = parse_job(
+            br#"{"tasks":[
+                {"id":"a","image":"x","steps":["ls"]},
+                {"id":"b","image":"x","isolation":"vm","steps":["ls"]}]}"#,
+            env,
+        )
+        .unwrap();
+        assert_eq!(job.tasks[0].container.isolation, Isolation::Container);
+        assert_eq!(job.tasks[1].container.isolation, Isolation::Vm);
+    }
+
+    #[test]
+    fn secrets_resolve_from_the_environment_and_need_vm() {
+        let job = parse_job(
+            br#"{"defaults":{"isolation":"vm"},
+                 "tasks":[{"id":"t","image":"x","steps":["ls"],
+                   "secrets":[{"env":"API_KEY","hosts":["api.example.com","*.example.org"]}]}]}"#,
+            env,
+        )
+        .unwrap();
+        let spec = &job.tasks[0].container;
+        assert_eq!(spec.secrets.len(), 1);
+        assert_eq!(spec.secrets[0].value, "secret");
+        assert_eq!(spec.secrets[0].hosts.len(), 2);
+        assert!(spec.env.is_empty(), "the value never becomes plain env");
+
+        let err = parse_job(
+            br#"{"tasks":[{"id":"t","image":"x","steps":["ls"],
+                   "secrets":[{"env":"API_KEY","hosts":["h"]}]}]}"#,
+            env,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("isolation"), "{err}");
+    }
+
+    #[test]
+    fn secrets_are_validated() {
+        let bad = |secret: &str| {
+            let json = format!(
+                r#"{{"defaults":{{"isolation":"vm"}},"tasks":[{{"id":"t","image":"x","steps":["ls"],
+                    "env":{{"TAKEN":"1"}},"secrets":[{secret}]}}]}}"#
+            );
+            parse_job(json.as_bytes(), env).unwrap_err().to_string()
+        };
+        assert!(bad(r#"{"env":"API_KEY","hosts":[]}"#).contains("hosts"));
+        assert!(bad(r#"{"env":"API KEY","hosts":["h"]}"#).contains("name"));
+        assert!(bad(r#"{"env":"TAKEN","hosts":["h"]}"#).contains("must not also"));
+        assert!(bad(r#"{"env":"NOPE","hosts":["h"]}"#).contains("not set"));
+        // A literal value in the job file is refused outright.
+        assert!(bad(r#"{"env":"API_KEY","hosts":["h"],"value":"x"}"#).contains("unknown field"));
     }
 
     #[test]

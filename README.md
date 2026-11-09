@@ -31,6 +31,17 @@ the public internet.
   touches the host kernel directly (install `runsc` and register it with
   Docker first: `runsc install && systemctl restart docker`).
 
+**Own kernel (opt-in per task): `"isolation": "vm"`.** The task then runs in a
+microVM instead of a container, so a kernel exploit inside it does not reach
+the host. The VMM is the host's choice (`--vm-backend`; today `sbx`, Docker
+Sandboxes), the job only says `vm`. The VM backend also keeps secrets out of
+the workload: a task's `secrets` are injected by a host-side proxy into
+requests to the hosts they are bound to, and inside the VM only a placeholder
+exists (see "Job file": `isolation` and `secrets`). The host needs KVM
+(nested virtualization on a cloud VM) and the backend installed and signed in.
+Container and VM tasks can share one job; the dispatcher connects only the
+runtimes a job uses.
+
 **What cellrun does NOT do: the host firewall.** See below. Without it, a task
 can reach the host itself, your LAN and cloud metadata.
 
@@ -89,6 +100,10 @@ Host settings (flag / env, never from job files):
   --task-dns-options DISPATCHER_TASK_DNS_OPTIONS resolv.conf options for tasks, e.g. use-vc = DNS over TCP (default none)
   --label-prefix  DISPATCHER_LABEL_PREFIX   labels <prefix>.dispatcher/.job/.task/.run (default cellrun)
   --bridge-prefix DISPATCHER_BRIDGE_PREFIX  task bridges <prefix><hex> (default cr; 1-2 chars [a-z0-9])
+  --vm-backend    DISPATCHER_VM_BACKEND     backend for isolation "vm" (default sbx)
+  --sbx-bin       DISPATCHER_SBX_BIN        the sbx executable (default sbx)
+  --vm-deny-network DISPATCHER_VM_DENY_NETWORK egress rules denied in every VM, on top of the backend's policy
+                                            (default: private, link-local/metadata, loopback, CGNAT; `none` = no extra rules)
 ```
 
 Exit codes: `0` all tasks succeeded · `1` some task failed · `2` invalid
@@ -189,6 +204,28 @@ host capacity, so it is set on the dispatcher (`--max-parallel` /
 `DISPATCHER_MAX_PARALLEL`), never by a job. Variables listed in
 `env_passthrough` are copied from the dispatcher's environment (keeps secrets
 out of job files); a missing or empty one is an input error.
+
+**VM tasks** (`"isolation": "vm"`, per task or in `defaults`; default
+`container`; a job can only ask for more isolation). `image` names a template
+known to the backend (for `sbx`: a saved or loaded template, or one of its
+agent images). `memory_mb` and `cpus` size the VM (`sbx` minimum 512 MiB);
+`swap_mb` and `pids` do not apply. Networking is the backend's policy plus
+`--vm-deny-network`. Names are `<label-prefix>.<run>.<job>.<task>.<id>`, so
+`cleanup` finds them without labels. Memory peaks are not reported for VMs.
+
+```jsonc
+"secrets": [{ "env": "GITHUB_TOKEN", "hosts": ["github.com", "api.github.com"] }]
+```
+
+`secrets` (VM tasks only) bind a dispatcher env var to the hosts it may be sent
+to. The value is read like `env_passthrough` (never in the job file; a literal
+`value` field is refused) and stored with the sandbox. The task's env var of
+the same name holds a placeholder; the proxy swaps in the real value in request
+headers to those hosts (also inside Basic auth, so `git` over https works),
+never in bodies or URLs. The task cannot read the value, but it can use it
+against the bound hosts, and a host that echoes request headers would return
+it: bind only hosts you trust, and keep token scopes narrow. A name may not
+also be in `env` or `env_passthrough`. Secrets are removed with the VM.
 
 ### Examples
 

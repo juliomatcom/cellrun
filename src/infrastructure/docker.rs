@@ -544,7 +544,7 @@ impl OutputObserver for Collect {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -606,7 +606,7 @@ fn validate_prefixes(config: &DockerConfig) -> Result<(), RuntimeError> {
 }
 
 /// 13 hex chars (52 bits) mixing time, pid and a process-wide counter.
-fn unique_hex() -> String {
+pub(super) fn unique_hex() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

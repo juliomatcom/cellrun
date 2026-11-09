@@ -9,12 +9,18 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use cellrun::application::{ContainerRuntime, ControlRouter, EventSink, OutputLimits, RunJob};
-use cellrun::domain::{Event, Job, JobId};
-use cellrun::infrastructure::{
-    ControlReader, DockerConfig, DockerRuntime, NdjsonSink, PullPolicy, open_control, parse_job,
-    write_report,
+use cellrun::application::{
+    ContainerRuntime, ControlRouter, EventSink, OutputLimits, Routed, RunJob,
 };
+use cellrun::domain::{Event, Isolation, Job, JobId};
+use cellrun::infrastructure::{
+    ControlReader, DEFAULT_DENY_NETWORK, DockerConfig, DockerRuntime, NdjsonSink, PullPolicy,
+    SbxConfig, SbxRuntime, VmRuntime, open_control, parse_job, write_report,
+};
+
+/// What the use case runs on: Docker for container tasks, the VM backend for
+/// VM tasks.
+type Runtime = Routed<DockerRuntime, VmRuntime>;
 
 const EXIT_TASK_FAILED: u8 = 1;
 const EXIT_BAD_INPUT: u8 = 2;
@@ -76,9 +82,61 @@ struct TaskArgs {
         default_value = "cr"
     )]
     bridge_prefix: String,
+    /// Backend that runs tasks with `isolation: "vm"`. Only needed when a job
+    /// has such tasks.
+    #[arg(
+        long,
+        global = true,
+        env = "DISPATCHER_VM_BACKEND",
+        value_enum,
+        default_value_t = VmBackend::Sbx
+    )]
+    vm_backend: VmBackend,
+    /// The `sbx` executable (Docker Sandboxes), for `--vm-backend sbx`.
+    #[arg(long, global = true, env = "DISPATCHER_SBX_BIN", default_value = "sbx")]
+    sbx_bin: String,
+    /// Egress deny rules added to every VM task, on top of the backend's own
+    /// policy (so the VM cannot reach the host's LAN or the cloud metadata
+    /// server). Empty: private, link-local, loopback and CGNAT ranges;
+    /// `none`: no extra rules.
+    #[arg(
+        long,
+        global = true,
+        env = "DISPATCHER_VM_DENY_NETWORK",
+        value_delimiter = ','
+    )]
+    vm_deny_network: Vec<String>,
 }
 
 impl TaskArgs {
+    fn vm_runtime(
+        &self,
+        pull: PullPolicy,
+    ) -> Result<VmRuntime, cellrun::application::RuntimeError> {
+        match self.vm_backend {
+            VmBackend::Sbx => SbxRuntime::new(self.sbx_config(pull)).map(VmRuntime::Sbx),
+        }
+    }
+
+    fn sbx_config(&self, pull: PullPolicy) -> SbxConfig {
+        let deny_network = match self.vm_deny_network.as_slice() {
+            [] => DEFAULT_DENY_NETWORK
+                .iter()
+                .map(|r| (*r).to_owned())
+                .collect(),
+            [only] if only == "none" => Vec::new(),
+            rules => rules.iter().filter(|r| !r.is_empty()).cloned().collect(),
+        };
+        SbxConfig {
+            bin: self.sbx_bin.clone(),
+            pull,
+            // Same prefix as the Docker labels, so one setting names both.
+            name_prefix: self.label_prefix.clone(),
+            deny_network,
+            ..SbxConfig::default()
+        }
+    }
+
     fn docker_config(&self, pull: PullPolicy) -> DockerConfig {
         DockerConfig {
             pull,
@@ -148,6 +206,13 @@ enum Command {
     },
 }
 
+/// MicroVM backends for `isolation: "vm"`.
+#[derive(Clone, Copy, ValueEnum)]
+enum VmBackend {
+    /// Docker Sandboxes (`sbx`).
+    Sbx,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum Pull {
     Missing,
@@ -195,21 +260,17 @@ async fn run_cli() -> ExitCode {
             max_parallel,
             control,
         } => {
-            let config = cli.task.docker_config(pull.into());
             let limits = OutputLimits {
                 tail_bytes,
                 max_line_bytes: max_line_bytes.get(),
             };
-            run(
-                &job,
-                &events,
-                &report,
-                config,
-                limits,
-                max_parallel,
-                control.as_deref(),
-            )
-            .await
+            let paths = RunPaths {
+                job: &job,
+                events: &events,
+                report: &report,
+                control: control.as_deref(),
+            };
+            run(paths, &cli.task, pull.into(), limits, max_parallel).await
         }
         Command::Validate { job } => match load_job(&job) {
             Ok(job) => {
@@ -218,25 +279,35 @@ async fn run_cli() -> ExitCode {
             }
             Err(code) => code,
         },
-        Command::Cleanup { job_id, all } => {
-            let config = cli.task.docker_config(PullPolicy::Never);
-            match job_id {
-                Some(job_id) if !all => cleanup(&job_id, config).await,
-                _ => cleanup_all(config).await,
-            }
-        }
+        Command::Cleanup { job_id, all } => match job_id {
+            Some(job_id) if !all => cleanup(&job_id, &cli.task).await,
+            _ => cleanup_all(&cli.task).await,
+        },
     }
 }
 
+/// The files a `run` reads and writes.
+#[derive(Clone, Copy)]
+struct RunPaths<'a> {
+    job: &'a Path,
+    events: &'a Path,
+    report: &'a Path,
+    control: Option<&'a Path>,
+}
+
 async fn run(
-    job: &Path,
-    events: &Path,
-    report: &Path,
-    config: DockerConfig,
+    paths: RunPaths<'_>,
+    task: &TaskArgs,
+    pull: PullPolicy,
     limits: OutputLimits,
     max_parallel: NonZeroUsize,
-    control: Option<&Path>,
 ) -> ExitCode {
+    let RunPaths {
+        job,
+        events,
+        report,
+        control,
+    } = paths;
     if control == Some(Path::new("-")) && job == Path::new("-") {
         return fail(
             EXIT_BAD_INPUT,
@@ -256,7 +327,8 @@ async fn run(
             );
         }
     };
-    let runtime = match connect(config).await {
+    let uses = |level: Isolation| job.tasks.iter().any(|t| t.container.isolation == level);
+    let runtime = match connect(task, pull, uses(Isolation::Container), uses(Isolation::Vm)).await {
         Ok(rt) => rt,
         Err(code) => return code,
     };
@@ -341,16 +413,16 @@ where
     std::future::pending().await
 }
 
-async fn cleanup(job_id: &str, config: DockerConfig) -> ExitCode {
+async fn cleanup(job_id: &str, task: &TaskArgs) -> ExitCode {
     let job_id = match JobId::new(job_id) {
         Ok(id) => id,
         Err(e) => return fail(EXIT_BAD_INPUT, e),
     };
-    let runtime = match connect(config).await {
-        Ok(rt) => rt,
+    let (docker, sbx) = match reachable(task).await {
+        Ok(pair) => pair,
         Err(code) => return code,
     };
-    match runtime.remove_job(&job_id).await {
+    match Routed::new(docker, sbx).remove_job(&job_id).await {
         Ok(n) => {
             println!("removed {n} container(s)");
             ExitCode::SUCCESS
@@ -359,17 +431,41 @@ async fn cleanup(job_id: &str, config: DockerConfig) -> ExitCode {
     }
 }
 
-async fn cleanup_all(config: DockerConfig) -> ExitCode {
-    let runtime = match connect(config).await {
-        Ok(rt) => rt,
+async fn cleanup_all(task: &TaskArgs) -> ExitCode {
+    let (docker, sbx) = match reachable(task).await {
+        Ok(pair) => pair,
         Err(code) => return code,
     };
-    match runtime.remove_all().await {
-        Ok(n) => {
-            println!("removed {n} container(s)");
-            ExitCode::SUCCESS
+    let mut total = 0;
+    if let Some(docker) = &docker {
+        match docker.remove_all().await {
+            Ok(n) => total += n,
+            Err(e) => return fail(EXIT_RUNTIME, e),
         }
-        Err(e) => fail(EXIT_RUNTIME, e),
+    }
+    if let Some(sbx) = &sbx {
+        match sbx.remove_all().await {
+            Ok(n) => total += n,
+            Err(e) => return fail(EXIT_RUNTIME, e),
+        }
+    }
+    println!("removed {total} container(s)");
+    ExitCode::SUCCESS
+}
+
+/// The runtimes that answer on this host, for cleanup: each is optional (a
+/// host with only Docker, or only `sbx`), but at least one must be there.
+async fn reachable(
+    task: &TaskArgs,
+) -> Result<(Option<DockerRuntime>, Option<VmRuntime>), ExitCode> {
+    let docker = connect_docker(task, PullPolicy::Never).await;
+    let sbx = match task.vm_runtime(PullPolicy::Never) {
+        Ok(rt) => rt.ping().await.map(|()| rt),
+        Err(e) => Err(e),
+    };
+    match (docker, sbx) {
+        (Err(d), Err(_)) => Err(fail(EXIT_RUNTIME, format_args!("docker unreachable: {d}"))),
+        (docker, sbx) => Ok((docker.ok(), sbx.ok())),
     }
 }
 
@@ -390,13 +486,43 @@ fn load_job(path: &Path) -> Result<Job, ExitCode> {
         .map_err(|e| fail(EXIT_BAD_INPUT, format_args!("invalid job: {e}")))
 }
 
-async fn connect(config: DockerConfig) -> Result<DockerRuntime, ExitCode> {
-    let runtime = DockerRuntime::connect(config).map_err(|e| fail(EXIT_RUNTIME, e))?;
-    runtime
-        .ping()
-        .await
-        .map_err(|e| fail(EXIT_RUNTIME, format_args!("docker unreachable: {e}")))?;
+async fn connect_docker(
+    task: &TaskArgs,
+    pull: PullPolicy,
+) -> Result<DockerRuntime, cellrun::application::RuntimeError> {
+    let runtime = DockerRuntime::connect(task.docker_config(pull))?;
+    runtime.ping().await?;
     Ok(runtime)
+}
+
+/// Connects only the runtimes the job needs, so a host without Docker can run
+/// VM-only jobs (and the other way round).
+async fn connect(
+    task: &TaskArgs,
+    pull: PullPolicy,
+    container: bool,
+    vm: bool,
+) -> Result<Runtime, ExitCode> {
+    let docker = if container {
+        Some(
+            connect_docker(task, pull)
+                .await
+                .map_err(|e| fail(EXIT_RUNTIME, format_args!("docker unreachable: {e}")))?,
+        )
+    } else {
+        None
+    };
+    let sbx = if vm {
+        let runtime = task.vm_runtime(pull).map_err(|e| fail(EXIT_RUNTIME, e))?;
+        runtime
+            .ping()
+            .await
+            .map_err(|e| fail(EXIT_RUNTIME, format_args!("vm backend unavailable: {e}")))?;
+        Some(runtime)
+    } else {
+        None
+    };
+    Ok(Routed::new(docker, sbx))
 }
 
 fn open_output<W: Write + Send + 'static>(

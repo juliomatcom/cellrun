@@ -73,10 +73,20 @@ own container: root, writable filesystem, public internet.
 | DNS | explicit public resolvers (private ranges are dropped) | `--task-dns` |
 | Filesystem | no bind mounts, no volumes, no docker socket; anonymous volumes removed with the container | `docker.rs` |
 | Kernel (optional) | `--task-runtime runsc` (gVisor) | `--task-runtime` / `DISPATCHER_TASK_RUNTIME` |
+| Kernel (per task) | `isolation: "vm"`: a microVM, backend chosen by the host | `--vm-backend`, `infrastructure/vm.rs`, `sbx.rs` |
 | Resources | memory (+ swap, default 1 GiB), CPU, pids limits | job file + defaults |
 | Parallelism | containers alive at once | `--max-parallel` / `DISPATCHER_MAX_PARALLEL` (never the job) |
 
 Rules:
+- **VM backends are pluggable.** `domain`, `application` and the job format only
+  know `Isolation::Vm` and `SecretSpec`, never a VMM. A backend is an adapter
+  implementing `ContainerRuntime` plus one `VmRuntime` variant and one
+  `VmBackend` value in `main.rs` (static dispatch: the port uses native
+  `async fn`). `Routed` picks the runtime per task and tags VM ids. Do not
+  name a backend in domain, application or the job format.
+- **Secrets never become VM env.** `secrets` are only valid with `vm`; the
+  backend injects them at the host-side proxy, and the workload gets a
+  placeholder. Values go to the backend on stdin, never on a command line.
 - **Jobs cannot weaken isolation.** `ContainerSpec` has no network, mount,
   capability or privilege fields; job input uses `deny_unknown_fields`.
   Do not add such fields.
@@ -97,6 +107,8 @@ src/
 │                       deps: domain, futures-util
 ├── infrastructure/  3. adapters: DockerRuntime (bollard, unix socket),
 │                       job_input (JSON -> domain), NdjsonSink, report_json.
+│                       `sbx.rs` (microVM backend via the `sbx` CLI), `vm.rs`
+│                       (the backend enum behind `isolation: "vm"`)
 │                       deps: application, domain, bollard, serde, tokio
 ├── lib.rs           exposes the three layers as the `cellrun` library
 └── main.rs          4. composition root: `dispatcher` binary (clap, tokio).
@@ -113,6 +125,7 @@ in `application`). Update its `RULES` table if you add a layer.
 | New invariant, new outcome/status, output buffering rules | `domain` |
 | Execution flow (ordering, halting, parallelism, events emitted) | `application` |
 | A new port (e.g. "upload artifacts") | trait in `application::ports`, impl in `infrastructure` |
+| A new VM backend (e.g. Firecracker) | adapter in `infrastructure`, a `VmRuntime` variant, a `VmBackend` value in `main.rs` |
 | Docker API details, JSON field names, event/report wire format | `infrastructure` |
 | CLI flags, exit codes, signal handling, choosing adapters | `main.rs` |
 
@@ -169,6 +182,7 @@ cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 cargo test                                                   # unit + architecture
 cargo test --test docker -- --ignored                        # needs Docker
+cargo test --test sbx -- --ignored                           # needs sbx, signed in
 cargo build --release                                        # target/release/dispatcher
 ./target/release/dispatcher run examples/hello.json > report.json 2> events.ndjson
 ```

@@ -12,6 +12,8 @@ pub mod report;
 
 pub use error::ValidationError;
 pub use event::{Event, StreamKind};
-pub use job::{ContainerSpec, Job, JobId, ResourceLimits, Step, Task, TaskId};
+pub use job::{
+    ContainerSpec, Isolation, Job, JobId, ResourceLimits, SecretSpec, Step, Task, TaskId,
+};
 pub use output::{LineSplitter, TailBuffer};
 pub use report::{JobReport, MemoryUsage, StepOutcome, StepReport, TaskReport, TaskStatus};
