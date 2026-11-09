@@ -25,7 +25,9 @@ impl OutputObserver for Capture {
 async fn runs_steps_in_a_microvm_and_cleans_up() {
     let runtime = SbxRuntime::new(SbxConfig::default()).unwrap();
     runtime.ping().await.unwrap();
-    let (job, task) = (JobId::new("it_job").unwrap(), TaskId::new("t1").unwrap());
+    // Ids as long as the api'''s (`agthy-<uuid>`): sbx refuses names over 63 characters.
+    let job = JobId::new("agthy-c6ef6cab-f138-4bf0-bb03-9dd28f4cd0b6").unwrap();
+    let task = TaskId::new("agent").unwrap();
     let mut spec = ContainerSpec::new(IMAGE).unwrap();
     spec.env = vec![("GREETING".to_owned(), "hello".to_owned())];
 

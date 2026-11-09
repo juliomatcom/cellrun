@@ -289,15 +289,35 @@ impl<'a> NameParts<'a> {
     }
 }
 
-fn sanitize(id: &str) -> String {
-    id.replace(['_', '.'], "-")
+/// sbx refuses names over 63 characters.
+const NAME_MAX: usize = 63;
+/// Length of the run id and the unique id in a name (`unique_hex` is 13 chars, the run id takes 8).
+const RUN_ID_LEN: usize = 8;
+const UNIQUE_ID_LEN: usize = 13;
+
+/// How many characters the job and task parts of a name may take: what is left of [`NAME_MAX`] after the prefix,
+/// the run id, the unique id and the four dots, split two to one. Both parts are cut to fit, and the job part
+/// depends only on the prefix, so `remove_job` can compute it again.
+fn part_budgets(prefix: &str) -> (usize, usize) {
+    let left = NAME_MAX.saturating_sub(prefix.len() + RUN_ID_LEN + UNIQUE_ID_LEN + 4);
+    let job = left * 2 / 3;
+    (job, left - job)
+}
+
+/// One dot-separated part of a name: `_` and `.` become `-`, cut to `max`, and sbx wants every part to start and end
+/// with a letter or digit (ids start with one; a cut or the id itself may leave a trailing `-`).
+fn sanitize(id: &str, max: usize) -> String {
+    let part: String = id.replace(['_', '.'], "-").chars().take(max).collect();
+    part.trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_owned()
 }
 
 fn sandbox_name(prefix: &str, run: &str, job: &JobId, task: &TaskId, id: &str) -> String {
+    let (job_max, task_max) = part_budgets(prefix);
     format!(
         "{prefix}.{run}.{}.{}.{id}",
-        sanitize(job.as_str()),
-        sanitize(task.as_str())
+        sanitize(job.as_str(), job_max),
+        sanitize(task.as_str(), task_max)
     )
 }
 
@@ -570,7 +590,7 @@ impl ContainerRuntime for SbxRuntime {
     }
 
     async fn remove_job(&self, job: &JobId) -> Result<usize, RuntimeError> {
-        let wanted = sanitize(job.as_str());
+        let wanted = sanitize(job.as_str(), part_budgets(&self.config.name_prefix).0);
         self.remove_matching(|p| p.job == wanted).await
     }
 
@@ -600,6 +620,41 @@ mod tests {
         );
         assert!(NameParts::parse("other-sandbox").is_none());
         assert!(NameParts::parse("a.b.c.d.e.f").is_none());
+    }
+
+    #[test]
+    fn names_fit_sbxs_limit_with_the_api_sized_ids() {
+        // What the api sends: `agthy-<uuid>` jobs, `agent` tasks, the `agthy` prefix.
+        let job = JobId::new("agthy-c6ef6cab-f138-4bf0-bb03-9dd28f4cd0b6").unwrap();
+        let task = TaskId::new("agent").unwrap();
+        let name = sandbox_name("agthy", "628b8a02", &job, &task, "629b8be6611b0");
+        assert!(name.len() <= NAME_MAX, "{} chars: {name}", name.len());
+        let parts = NameParts::parse(&name).unwrap();
+        // remove_job finds it again from the job id alone.
+        assert_eq!(parts.job, sanitize(job.as_str(), part_budgets("agthy").0));
+        // A cut (or the id) that ends in a dash must not end a part: sbx wants letters or digits at both ends.
+        let cut = JobId::new("agthy-c6ef6cab-f138-4bf0-bb03-9dd28f4cd0b6").unwrap();
+        for part in sandbox_name(
+            "cellrun",
+            "628b8a02",
+            &cut,
+            &TaskId::new("a-").unwrap(),
+            "1",
+        )
+        .split('.')
+        {
+            assert!(
+                part.ends_with(|c: char| c.is_ascii_alphanumeric()),
+                "{part}"
+            );
+        }
+        // The longest prefix and the longest ids still fit.
+        let long = TaskId::new("t".repeat(64)).unwrap();
+        let long_job = JobId::new("j".repeat(64)).unwrap();
+        let prefix = "p".repeat(16);
+        assert!(
+            sandbox_name(&prefix, "628b8a02", &long_job, &long, "629b8be6611b0").len() <= NAME_MAX
+        );
     }
 
     #[test]
